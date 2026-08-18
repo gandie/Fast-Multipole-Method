@@ -24,11 +24,13 @@ void printHelp() {
               << "  -h, --help                Print this help message and exit\n"
               << "  -r, --rebuild-every N    Tree rebuild frequency (default: 1, every frame)\n"
               << "  -c, --cluster-bodies N   Number of cluster-distributed bodies (default: 40000)\n"
-              << "  -u, --uniform-bodies N   Number of uniformly-distributed bodies (default: 10000)\n\n"
+              << "  -u, --uniform-bodies N   Number of uniformly-distributed bodies (default: 10000)\n"
+              << "  -b, --black-hole M       Create massive central body with mass M (default: disabled)\n\n"
               << "Examples:\n"
               << "  sim                              # Run with defaults\n"
               << "  sim -r 4 -c 30000 -u 5000       # Custom rebuild/body counts\n"
-              << "  sim --rebuild-every 2 --cluster-bodies 20000\n";
+              << "  sim --rebuild-every 2 --cluster-bodies 20000\n"
+              << "  sim -b 100000                    # Add black hole with mass 100000\n";
 }
 
 // Async tree building manager
@@ -148,6 +150,7 @@ int main(int argc, char* argv[]) {
     int rebuild_every = 1;
     int cluster_bodies = 40000;
     int uniform_bodies = 10000;
+    double black_hole_mass = 0.0;  // 0 = disabled
 
     // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
@@ -172,6 +175,11 @@ int main(int argc, char* argv[]) {
             if (!val) return 1;
             uniform_bodies = *val;
         }
+        else if (arg == "-b" || arg == "--black-hole") {
+            auto val = parseIntArg(argc, argv, i);
+            if (!val) return 1;
+            black_hole_mass = *val;
+        }
         else {
             std::cerr << "Error: unknown argument: " << arg << "\n";
             std::cerr << "Use -h or --help for usage information\n";
@@ -190,6 +198,10 @@ int main(int argc, char* argv[]) {
     }
     if (cluster_bodies + uniform_bodies == 0) {
         std::cerr << "Error: total body count must be > 0\n";
+        return 1;
+    }
+    if (black_hole_mass < 0.0) {
+        std::cerr << "Error: black hole mass cannot be negative\n";
         return 1;
     }
     sf::Color p_color = sf::Color::Cyan;
@@ -234,9 +246,18 @@ int main(int argc, char* argv[]) {
     std::uniform_real_distribution<double> uniform(100.0, screen_size * 1.0 - 100.0);
 
     std::vector<fmm::Source> sources;
-    sources.reserve(cluster_bodies + uniform_bodies);
+    int total_bodies = cluster_bodies + uniform_bodies;
+    if (black_hole_mass > 0.0) total_bodies += 1;
+    sources.reserve(total_bodies);
 
     Complex center{1.0 * screen_size / 2, 1.0 * screen_size / 2};
+    
+    // Create massive central body (black hole) if enabled
+    if (black_hole_mass > 0.0) {
+        sources.emplace_back(center.real(), center.imag(), black_hole_mass);
+        sources.back().velocity = Complex{0.0, 0.0};  // Keep at center
+    }
+    
     for (int i = 0; i < cluster_bodies; i++) {
         double x = cluster(gen), y = cluster(gen);
         while (x < 100 || x > screen_size - 100) x = cluster(gen);
@@ -360,13 +381,26 @@ int main(int argc, char* argv[]) {
         phaseClock.restart();
         {
             auto lock = async_builder.lockSourcesScoped();
+            // Skip black hole (index 0) if present
+            int start_idx = (black_hole_mass > 0.0) ? 1 : 0;
             #pragma omp parallel for schedule(static)
-            for (int i = 0; i < static_cast<int>(sources.size()); i++) {
+            for (int i = start_idx; i < static_cast<int>(sources.size()); i++) {
                 sources[i].velocity += 0.5 * current_forces[i] * dt;
                 sources[i].position += sources[i].velocity * dt;
             }
         }
         tIntegrateMs = static_cast<float>(phaseClock.getElapsedTime().asMicroseconds()) / 1000.0f;
+
+        // Ensure black hole stays fixed at center (find it by its large mass)
+        if (black_hole_mass > 0.0) {
+            for (int i = 0; i < static_cast<int>(sources.size()); i++) {
+                if (sources[i].q >= black_hole_mass * 0.9) {  // Account for floating point
+                    sources[i].position = center;
+                    sources[i].velocity = Complex{0.0, 0.0};
+                    break;  // Only one black hole
+                }
+            }
+        }
 
         // Phase 2: attempt to swap forces if tree building completed, then start new build
         phaseClock.restart();
@@ -387,8 +421,10 @@ int main(int argc, char* argv[]) {
 
         {
             auto lock = async_builder.lockSourcesScoped();
+            // Skip black hole (index 0) if present
+            int start_idx = (black_hole_mass > 0.0) ? 1 : 0;
             #pragma omp parallel for schedule(static)
-            for (int i = 0; i < static_cast<int>(sources.size()); i++) {
+            for (int i = start_idx; i < static_cast<int>(sources.size()); i++) {
                 sources[i].velocity += 0.5 * current_forces[i] * dt;
             }
 
