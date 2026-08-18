@@ -82,6 +82,54 @@ struct AsyncTreeBuilder {
 };
 
 
+// Add particles around cursor position with random velocity
+void addParticles(std::vector<fmm::Source>& sources, const sf::Vector2f& cursor, 
+                  double radius, std::mt19937& gen, int screen_size, int count = 1000) {
+    std::uniform_real_distribution<double> angle_dist(0.0, 2.0 * M_PI);
+    std::uniform_real_distribution<double> r_dist(0.0, radius);
+    std::uniform_real_distribution<double> speed_dist(50.0, 200.0);
+    
+    // Pre-reserve to avoid reallocation during adds
+    sources.reserve(sources.size() + count);
+    
+    for (int i = 0; i < count; ++i) {
+        // Random position within radius circle
+        double theta = angle_dist(gen);
+        double r = r_dist(gen);
+        double x = cursor.x + r * std::cos(theta);
+        double y = cursor.y + r * std::sin(theta);
+        
+        // Clamp to screen bounds [100, screen_size - 100]
+        x = std::clamp(x, 100.0, static_cast<double>(screen_size - 100));
+        y = std::clamp(y, 100.0, static_cast<double>(screen_size - 100));
+        
+        // Random velocity direction and magnitude
+        double vel_theta = angle_dist(gen);
+        double vel_mag = speed_dist(gen);
+        double vx = vel_mag * std::cos(vel_theta);
+        double vy = vel_mag * std::sin(vel_theta);
+        
+        sources.emplace_back(x, y, 1.0);
+        sources.back().velocity = Complex{vx, vy};
+    }
+}
+
+// Remove particles within radius of cursor position
+void removeParticles(std::vector<fmm::Source>& sources, const sf::Vector2f& cursor, double radius) {
+    auto it = sources.begin();
+    while (it != sources.end()) {
+        double dx = it->position.real() - cursor.x;
+        double dy = it->position.imag() - cursor.y;
+        double dist = std::sqrt(dx * dx + dy * dy);
+        
+        if (dist <= radius) {
+            it = sources.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 std::optional<int> parseIntArg(int argc, char* argv[], int& i) {
     if (i + 1 >= argc) {
         std::cerr << "Error: argument requires a value\n";
@@ -216,6 +264,12 @@ int main(int argc, char* argv[]) {
 
     bool drawBoxes = false;
 
+    // Interactive particle manipulation
+    double interaction_radius = 50.0;
+    const double radius_step = 5.0;
+    const double radius_min = 10.0;
+    const double radius_max = 300.0;
+
     // Async tree building infrastructure
     AsyncTreeBuilder async_builder;
     std::vector<Complex> current_forces = tree.forces;
@@ -244,6 +298,59 @@ int main(int argc, char* argv[]) {
             if (event->is<sf::Event::Closed>()) window.close();
             else if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>()) {
                 if (keyPressed->scancode == sf::Keyboard::Scancode::Escape) window.close();
+            }
+            else if (const auto* mouseButton = event->getIf<sf::Event::MouseButtonPressed>()) {
+                sf::Vector2f cursor = window.mapPixelToCoords(sf::Mouse::getPosition(window));
+                
+                {
+                    auto lock = async_builder.lockSourcesScoped();
+                    size_t old_size = sources.size();
+                    
+                    if (mouseButton->button == sf::Mouse::Button::Left) {
+                        addParticles(sources, cursor, interaction_radius, gen, screen_size, 1000);
+                    } else if (mouseButton->button == sf::Mouse::Button::Right) {
+                        removeParticles(sources, cursor, interaction_radius);
+                    }
+                    
+                    size_t new_size = sources.size();
+                    
+                    // If particle count changed, IMMEDIATELY rebuild tree synchronously
+                    // to maintain consistency between tree indices, forces, and sources.
+                    // Adding/removing particles invalidates tree node indices (start_id, num_sources).
+                    if (new_size != old_size) {
+                        // Wait for any in-flight async build to finish
+                        if (async_builder.worker_thread.joinable()) {
+                            async_builder.worker_thread.join();
+                        }
+                        async_builder.building.store(false);
+                        
+                        // CRITICAL: Clear pending_forces to prevent stale async build results
+                        // from being swapped in after we've added/removed particles!
+                        {
+                            std::lock_guard<std::mutex> lock(async_builder.forces_mutex);
+                            async_builder.pending_forces.clear();
+                        }
+                        
+                        // Rebuild tree synchronously with current particle state
+                        tree.buildTree();
+                        
+                        // Update forces and auxiliary data structures
+                        current_forces = tree.forces;
+                        
+                        // Rebuild vertex array
+                        particle_va.resize(new_size);
+                        for (size_t i = 0; i < new_size; ++i) {
+                            particle_va[i].color = p_color;
+                        }
+                    }
+                }
+            }
+            else if (const auto* scroll = event->getIf<sf::Event::MouseWheelScrolled>()) {
+                if (scroll->delta > 0) {
+                    interaction_radius = std::min(interaction_radius + radius_step, radius_max);
+                } else {
+                    interaction_radius = std::max(interaction_radius - radius_step, radius_min);
+                }
             }
         }
 
@@ -337,7 +444,9 @@ int main(int argc, char* argv[]) {
                 << "buildTree: " << tBuildMs << " ms"
                 << " (ema " << emaBuildMs << ", max " << maxBuildMs << ")\n"
                 << "render: " << tRenderMs << " ms\n"
-                << "build every N: " << rebuild_every;
+                << "build every N: " << rebuild_every << "\n"
+                << "particles: " << sources.size() << "\n"
+                << "interaction radius: " << static_cast<int>(interaction_radius) << " px";
             overlay.setString(oss.str());
             uiTimer.restart();
         }
