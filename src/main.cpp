@@ -25,12 +25,14 @@ void printHelp() {
               << "  -r, --rebuild-every N    Tree rebuild frequency (default: 1, every frame)\n"
               << "  -c, --cluster-bodies N   Number of cluster-distributed bodies (default: 40000)\n"
               << "  -u, --uniform-bodies N   Number of uniformly-distributed bodies (default: 10000)\n"
+              << "  -o, --orbit N            Number of circular-orbit bodies (requires --black-hole)\n"
               << "  -b, --black-hole M       Create massive central body with mass M (default: disabled)\n\n"
               << "Examples:\n"
               << "  sim                              # Run with defaults\n"
               << "  sim -r 4 -c 30000 -u 5000       # Custom rebuild/body counts\n"
               << "  sim --rebuild-every 2 --cluster-bodies 20000\n"
-              << "  sim -b 100000                    # Add black hole with mass 100000\n";
+              << "  sim -b 100000                    # Add black hole with mass 100000\n"
+              << "  sim -b 100000 -o 2000            # Spawn 2000 orbit bodies around black hole\n";
 }
 
 // Async tree building manager
@@ -150,6 +152,7 @@ int main(int argc, char* argv[]) {
     int rebuild_every = 1;
     int cluster_bodies = 40000;
     int uniform_bodies = 10000;
+    int orbit_bodies = 0;
     double black_hole_mass = 0.0;  // 0 = disabled
 
     // Parse command-line arguments
@@ -175,6 +178,11 @@ int main(int argc, char* argv[]) {
             if (!val) return 1;
             uniform_bodies = *val;
         }
+        else if (arg == "-o" || arg == "--orbit") {
+            auto val = parseIntArg(argc, argv, i);
+            if (!val) return 1;
+            orbit_bodies = *val;
+        }
         else if (arg == "-b" || arg == "--black-hole") {
             auto val = parseIntArg(argc, argv, i);
             if (!val) return 1;
@@ -192,16 +200,20 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: rebuild-every must be >= 1\n";
         return 1;
     }
-    if (cluster_bodies < 0 || uniform_bodies < 0) {
+    if (cluster_bodies < 0 || uniform_bodies < 0 || orbit_bodies < 0) {
         std::cerr << "Error: body counts cannot be negative\n";
         return 1;
     }
-    if (cluster_bodies + uniform_bodies == 0) {
+    if (cluster_bodies + uniform_bodies + orbit_bodies == 0) {
         std::cerr << "Error: total body count must be > 0\n";
         return 1;
     }
     if (black_hole_mass < 0.0) {
         std::cerr << "Error: black hole mass cannot be negative\n";
+        return 1;
+    }
+    if (orbit_bodies > 0 && black_hole_mass <= 0.0) {
+        std::cerr << "Error: orbit bodies require --black-hole with positive mass\n";
         return 1;
     }
     sf::Color p_color = sf::Color::Cyan;
@@ -246,7 +258,7 @@ int main(int argc, char* argv[]) {
     std::uniform_real_distribution<double> uniform(100.0, screen_size * 1.0 - 100.0);
 
     std::vector<fmm::Source> sources;
-    int total_bodies = cluster_bodies + uniform_bodies;
+    int total_bodies = cluster_bodies + uniform_bodies + orbit_bodies;
     if (black_hole_mass > 0.0) total_bodies += 1;
     sources.reserve(total_bodies);
 
@@ -275,6 +287,32 @@ int main(int argc, char* argv[]) {
             Complex tangent{-disp.imag(), disp.real()};
             tangent /= r;
             s.velocity = tangent * orbital_speed;
+        }
+    }
+
+    if (orbit_bodies > 0) {
+        std::uniform_real_distribution<double> orbit_angle(0.0, 2.0 * M_PI);
+        std::uniform_real_distribution<double> orbit_radius(120.0, static_cast<double>(screen_size) * 0.5 - 120.0);
+        std::uniform_real_distribution<double> speed_jitter(0.9, 1.1);
+        constexpr double orbit_direction = 1.0;  // +1 for one consistent tangential direction
+
+        const double base_orbit_speed = std::sqrt(black_hole_mass);
+        for (int i = 0; i < orbit_bodies; ++i) {
+            double theta = orbit_angle(gen);
+            double r = orbit_radius(gen);
+
+            double x = center.real() + r * std::cos(theta);
+            double y = center.imag() + r * std::sin(theta);
+
+            sources.emplace_back(x, y, 1.0);
+
+            Complex radial = sources.back().position - center;
+            double radial_norm = std::abs(radial);
+            if (radial_norm > 1e-9) {
+                Complex tangent{-radial.imag(), radial.real()};
+                tangent /= radial_norm;
+                sources.back().velocity = tangent * (orbit_direction * base_orbit_speed * speed_jitter(gen));
+            }
         }
     }
 
