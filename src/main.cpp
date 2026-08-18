@@ -7,6 +7,9 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <thread>
+#include <atomic>
+#include <mutex>
 
 #include <omp.h>
 
@@ -27,6 +30,57 @@ void printHelp() {
               << "  sim -r 4 -c 30000 -u 5000       # Custom rebuild/body counts\n"
               << "  sim --rebuild-every 2 --cluster-bodies 20000\n";
 }
+
+// Async tree building manager
+struct AsyncTreeBuilder {
+    std::thread worker_thread;
+    std::atomic<bool> building{false};
+    std::atomic<bool> should_stop{false};
+    std::mutex forces_mutex;
+    std::mutex sources_mutex;
+    std::vector<Complex> pending_forces;
+    
+    template<typename TreeType>
+    void startBuild(TreeType& tree) {
+        if (building.load()) return; // Already building
+        
+        building.store(true);
+        if (worker_thread.joinable()) worker_thread.join();
+        
+        worker_thread = std::thread([this, &tree]() {
+            {
+                std::lock_guard<std::mutex> lock(sources_mutex);
+                tree.buildTree();
+            }
+            {
+                std::lock_guard<std::mutex> lock(forces_mutex);
+                pending_forces = tree.forces;
+            }
+            building.store(false);
+        });
+    }
+    
+    bool trySwapForces(std::vector<Complex>& current_forces) {
+        if (!building.load()) {
+            std::lock_guard<std::mutex> lock(forces_mutex);
+            if (!pending_forces.empty()) {
+                current_forces.swap(pending_forces);
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    std::unique_lock<std::mutex> lockSourcesScoped() {
+        return std::unique_lock<std::mutex>(sources_mutex);
+    }
+    
+    ~AsyncTreeBuilder() {
+        should_stop.store(true);
+        if (worker_thread.joinable()) worker_thread.join();
+    }
+};
+
 
 std::optional<int> parseIntArg(int argc, char* argv[], int& i) {
     if (i + 1 >= argc) {
@@ -162,6 +216,10 @@ int main(int argc, char* argv[]) {
 
     bool drawBoxes = false;
 
+    // Async tree building infrastructure
+    AsyncTreeBuilder async_builder;
+    std::vector<Complex> current_forces = tree.forces;
+
     // Reused draw buffers
     sf::VertexArray particle_va(sf::PrimitiveType::Points, sources.size());
     for (size_t i = 0; i < sources.size(); ++i) {
@@ -193,17 +251,22 @@ int main(int argc, char* argv[]) {
 
         // Phase 1: integrate (half-kick + drift)
         phaseClock.restart();
-        #pragma omp parallel for schedule(static)
-        for (int i = 0; i < static_cast<int>(sources.size()); i++) {
-            sources[i].velocity += 0.5 * tree.forces[i] * dt;
-            sources[i].position += sources[i].velocity * dt;
+        {
+            auto lock = async_builder.lockSourcesScoped();
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < static_cast<int>(sources.size()); i++) {
+                sources[i].velocity += 0.5 * current_forces[i] * dt;
+                sources[i].position += sources[i].velocity * dt;
+            }
         }
         tIntegrateMs = static_cast<float>(phaseClock.getElapsedTime().asMicroseconds()) / 1000.0f;
 
-        // Phase 2: rebuild tree (optionally decimated)
+        // Phase 2: attempt to swap forces if tree building completed, then start new build
         phaseClock.restart();
+        async_builder.trySwapForces(current_forces);
+        
         if (rebuild_every <= 1 || (tot_frames % rebuild_every) == 0) {
-            tree.buildTree();
+            async_builder.startBuild(tree);
         }
         tBuildMs = static_cast<float>(phaseClock.getElapsedTime().asMicroseconds()) / 1000.0f;
 
@@ -215,17 +278,20 @@ int main(int argc, char* argv[]) {
         // Phase 3: second half-kick + draw prep + draw
         phaseClock.restart();
 
-        #pragma omp parallel for schedule(static)
-        for (int i = 0; i < static_cast<int>(sources.size()); i++) {
-            sources[i].velocity += 0.5 * tree.forces[i] * dt;
-        }
+        {
+            auto lock = async_builder.lockSourcesScoped();
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < static_cast<int>(sources.size()); i++) {
+                sources[i].velocity += 0.5 * current_forces[i] * dt;
+            }
 
-        // Updating vertex buffer is often smoother single-threaded
-        for (size_t i = 0; i < sources.size(); ++i) {
-            particle_va[i].position = sf::Vector2f(
-                static_cast<float>(sources[i].position.real()),
-                static_cast<float>(sources[i].position.imag())
-            );
+            // Updating vertex buffer is often smoother single-threaded
+            for (size_t i = 0; i < sources.size(); ++i) {
+                particle_va[i].position = sf::Vector2f(
+                    static_cast<float>(sources[i].position.real()),
+                    static_cast<float>(sources[i].position.imag())
+                );
+            }
         }
 
         if (drawBoxes) {
