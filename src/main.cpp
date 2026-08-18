@@ -14,7 +14,82 @@
 #include "barnes_hut_tree.hpp"
 #include "diagnostics.hpp"
 
-int main() {
+void printHelp() {
+    std::cout << "FMM Simulation - N-body simulation using Fast Multipole Method\n\n"
+              << "Usage: sim [options]\n\n"
+              << "Options:\n"
+              << "  -h, --help                Print this help message and exit\n"
+              << "  -r, --rebuild-every N    Tree rebuild frequency (default: 1, every frame)\n"
+              << "  -c, --cluster-bodies N   Number of cluster-distributed bodies (default: 40000)\n"
+              << "  -u, --uniform-bodies N   Number of uniformly-distributed bodies (default: 10000)\n\n"
+              << "Examples:\n"
+              << "  sim                              # Run with defaults\n"
+              << "  sim -r 4 -c 30000 -u 5000       # Custom rebuild/body counts\n"
+              << "  sim --rebuild-every 2 --cluster-bodies 20000\n";
+}
+
+std::optional<int> parseIntArg(int argc, char* argv[], int& i) {
+    if (i + 1 >= argc) {
+        std::cerr << "Error: argument requires a value\n";
+        return std::nullopt;
+    }
+    try {
+        return std::stoi(argv[++i]);
+    } catch (...) {
+        std::cerr << "Error: invalid integer value: " << argv[i] << "\n";
+        return std::nullopt;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    // Default values
+    int rebuild_every = 1;
+    int cluster_bodies = 40000;
+    int uniform_bodies = 10000;
+
+    // Parse command-line arguments
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        
+        if (arg == "-h" || arg == "--help") {
+            printHelp();
+            return 0;
+        }
+        else if (arg == "-r" || arg == "--rebuild-every") {
+            auto val = parseIntArg(argc, argv, i);
+            if (!val) return 1;
+            rebuild_every = *val;
+        }
+        else if (arg == "-c" || arg == "--cluster-bodies") {
+            auto val = parseIntArg(argc, argv, i);
+            if (!val) return 1;
+            cluster_bodies = *val;
+        }
+        else if (arg == "-u" || arg == "--uniform-bodies") {
+            auto val = parseIntArg(argc, argv, i);
+            if (!val) return 1;
+            uniform_bodies = *val;
+        }
+        else {
+            std::cerr << "Error: unknown argument: " << arg << "\n";
+            std::cerr << "Use -h or --help for usage information\n";
+            return 1;
+        }
+    }
+
+    // Validate inputs
+    if (rebuild_every < 1) {
+        std::cerr << "Error: rebuild-every must be >= 1\n";
+        return 1;
+    }
+    if (cluster_bodies < 0 || uniform_bodies < 0) {
+        std::cerr << "Error: body counts cannot be negative\n";
+        return 1;
+    }
+    if (cluster_bodies + uniform_bodies == 0) {
+        std::cerr << "Error: total body count must be > 0\n";
+        return 1;
+    }
     sf::Color p_color = sf::Color::Cyan;
     const int screen_size = 1380;
     sf::RenderWindow window(sf::VideoMode({screen_size, screen_size}), "Simulation");
@@ -22,7 +97,6 @@ int main() {
 
     // Simulation settings
     const double dt = 0.001;
-    const int BUILD_EVERY_N_FRAMES = 4; // 1 = every frame, 2 = every second frame, etc.
 
     sf::Clock frameTimer;
     sf::Clock phaseClock;
@@ -58,16 +132,16 @@ int main() {
     std::uniform_real_distribution<double> uniform(100.0, screen_size * 1.0 - 100.0);
 
     std::vector<fmm::Source> sources;
-    sources.reserve(50000);
+    sources.reserve(cluster_bodies + uniform_bodies);
 
     Complex center{1.0 * screen_size / 2, 1.0 * screen_size / 2};
-    for (size_t i = 0; i < 40000; i++) {
+    for (int i = 0; i < cluster_bodies; i++) {
         double x = cluster(gen), y = cluster(gen);
         while (x < 100 || x > screen_size - 100) x = cluster(gen);
         while (y < 100 || y > screen_size - 100) y = cluster(gen);
         sources.emplace_back(x, y, 10.0);
     }
-    for (size_t i = 0; i < 10000; i++)
+    for (int i = 0; i < uniform_bodies; i++)
         sources.emplace_back(uniform(gen), uniform(gen), 1.0);
 
     const double orbital_speed = 200.0;
@@ -128,7 +202,7 @@ int main() {
 
         // Phase 2: rebuild tree (optionally decimated)
         phaseClock.restart();
-        if (BUILD_EVERY_N_FRAMES <= 1 || (tot_frames % BUILD_EVERY_N_FRAMES) == 0) {
+        if (rebuild_every <= 1 || (tot_frames % rebuild_every) == 0) {
             tree.buildTree();
         }
         tBuildMs = static_cast<float>(phaseClock.getElapsedTime().asMicroseconds()) / 1000.0f;
@@ -197,7 +271,7 @@ int main() {
                 << "buildTree: " << tBuildMs << " ms"
                 << " (ema " << emaBuildMs << ", max " << maxBuildMs << ")\n"
                 << "render: " << tRenderMs << " ms\n"
-                << "build every N: " << BUILD_EVERY_N_FRAMES;
+                << "build every N: " << rebuild_every;
             overlay.setString(oss.str());
             uiTimer.restart();
         }
