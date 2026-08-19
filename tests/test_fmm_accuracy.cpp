@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include "barnes_hut_tree.hpp"
 #include "diagnostics.hpp"
 #include "fmm_tree.hpp"
 
@@ -36,4 +37,29 @@ TEST_CASE("FMM force approximation stays within conservative relative error", "[
     const fmm::ErrorData error = fmm::evaluateSimulationError(sources, tree.forces, sources.size());
     REQUIRE(error.l2_relative_error < 0.12);
     REQUIRE(error.mean_absolute_error < 0.01);
+}
+
+TEST_CASE("FMM single-leaf build computes forces and exposes one box", "[accuracy][fmm][boxes]") {
+    std::vector<fmm::Source> sources{{200.0, 200.0, 1.0}, {230.0, 210.0, 1.2}};
+
+    fmm::FmmTree tree(sources, 10, 8);
+    tree.buildTree();
+
+    REQUIRE(tree.height == 0);
+    REQUIRE(tree.forces.size() == sources.size());
+
+    const auto boxes = tree.getBoxGeometries();
+    REQUIRE(boxes.size() == 1);
+    REQUIRE(boxes[0].second > 0.0);
+}
+
+TEST_CASE("Barnes-Hut exposes box geometries after build", "[accuracy][barnes-hut][boxes]") {
+    std::vector<fmm::Source> sources{{100.0, 100.0, 1.0}, {160.0, 130.0, 1.0}, {220.0, 190.0, 1.0}};
+
+    fmm::BhTree tree(sources, 1, 0.8);
+    tree.buildTree();
+
+    const auto boxes = tree.getBoxGeometries();
+    REQUIRE_FALSE(boxes.empty());
+    REQUIRE(boxes.front().second > 0.0);
 }

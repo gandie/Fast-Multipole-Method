@@ -1,3 +1,33 @@
+---
+agent_evaluation:
+  version: 1
+  evaluator: human_operator
+  evaluated_at: YYYY-MM-DD
+  verdict: accepted
+  would_delegate_similar_again: true
+
+  score_scale:
+    min: 1
+    max: 5
+    meaning:
+      1: poor
+      3: acceptable
+      5: excellent
+
+  outcome:
+    correctness: 4
+    scope_discipline: 5
+    validation_trust: 4
+
+  collaboration:
+    ambiguity_handling: 5
+    operator_load: 5
+    trust_delta: 4
+
+  notes: >
+    Robot even asks for scores. Robot did well, not much friction
+---
+
 # T06 Testing Foundation and Coverage Ramp
 
 ## Metadata
@@ -28,6 +58,7 @@ Establish a practical C++ testing foundation and execute a staged plan toward hi
 
 ## Target Files
 - CMakeLists.txt
+- README.md
 - src/main.cpp
 - src/adaptive_quadtree.hpp
 - src/math_utils.hpp
@@ -47,7 +78,7 @@ Establish a practical C++ testing foundation and execute a staged plan toward hi
 - tests/test_fmm_accuracy.cpp
 - tests/test_regressions.cpp
 - docs/workflow/changelog/2026-08.md
-- docs/workflow/tasks/T06_testing_foundation_and_coverage_plan.md
+- docs/workflow/done/T06_testing_foundation_and_coverage_plan.md
 
 ## Verification
 - cmake -S . -B build -DBUILD_TESTING=ON
@@ -60,44 +91,79 @@ Establish a practical C++ testing foundation and execute a staged plan toward hi
 
 ## Implementation Notes
 - Phase 1 implemented:
-	- Root CMake now includes CTest and conditionally fetches Catch2 when BUILD_TESTING is enabled.
-	- Added tests subdirectory build wiring with Catch2 test discovery.
-	- Fixed CMake ordering so `find_package(OpenMP REQUIRED)` runs before test target configuration.
+  - Root CMake now includes CTest and conditionally fetches Catch2 when BUILD_TESTING is enabled.
+  - Added tests subdirectory build wiring with Catch2 test discovery.
+  - Fixed CMake ordering so `find_package(OpenMP REQUIRED)` runs before test target configuration.
 - Phase 2 implemented:
-	- Added deterministic unit tests for BinomialTable behavior.
-	- Added deterministic quadtree tests for data-range bounds and adjacency edge cases.
-	- Added deterministic expansion tests that compare multipole/local evaluations against direct computations.
+  - Added deterministic unit tests for BinomialTable behavior.
+  - Added deterministic quadtree tests for data-range bounds and adjacency edge cases.
+  - Added deterministic expansion tests that compare multipole/local evaluations against direct computations.
 - Phase 3 implemented:
-	- Extended invariant coverage with Barnes-Hut and FMM leaf partition coverage checks (contiguous, gap-free coverage of source ranges).
-	- Added force-vector sizing assertions after Barnes-Hut and FMM tree builds.
+  - Extended invariant coverage with Barnes-Hut and FMM leaf partition coverage checks (contiguous, gap-free coverage of source ranges).
+  - Added force-vector sizing assertions after Barnes-Hut and FMM tree builds.
 - Phase 4 implemented:
-	- Added Barnes-Hut and FMM conservative numerical-accuracy tests against exact-force diagnostics on deterministic grid fixtures.
+  - Added Barnes-Hut and FMM conservative numerical-accuracy tests against exact-force diagnostics on deterministic grid fixtures.
 - Phase 5 implemented:
-	- Added testable CLI parsing seam in `src/sim_options.hpp` and integrated it into `src/main.cpp`.
-	- Added testable force-swap seam in `src/force_swap.hpp` and integrated it into `src/main.cpp`.
-	- Added regression tests for argument validation and stale pending-force swap safety.
+  - Added testable CLI parsing seam in `src/sim_options.hpp` and integrated it into `src/main.cpp`.
+  - Added testable force-swap seam in `src/force_swap.hpp` and integrated it into `src/main.cpp`.
+  - Added regression tests for argument validation and stale pending-force swap safety.
 - Phase 6 implemented:
-	- Added optional `ENABLE_COVERAGE` CMake option with GNU/Clang coverage flags.
+  - Added optional `ENABLE_COVERAGE` CMake option with GNU/Clang coverage flags.
 - Phase 7 implemented:
-	- Expanded `tests/README.md` with full suite layout, coverage workflow, and test authoring conventions.
+  - Expanded `tests/README.md` with full suite layout, coverage workflow, and test authoring conventions.
 - Added test onboarding documentation in `tests/README.md` with local run instructions and test authoring conventions.
 - Fixed header self-containment issues needed by standalone test compilation:
-	- `src/adaptive_quadtree.hpp` now includes `<tuple>` and `<functional>`.
-	- `src/math_utils.hpp` now includes `<iomanip>` and `<stdexcept>`.
+  - `src/adaptive_quadtree.hpp` now includes `<tuple>` and `<functional>`.
+  - `src/math_utils.hpp` now includes `<iomanip>` and `<stdexcept>`.
 - Resolved linker ODR failures by marking header-defined `readFile` and `toFile` inline in `src/math_utils.hpp`.
 
 ## Verification Results
-- Local user verification confirmed configure and build wiring issues were surfaced and fixed:
-	- OpenMP target visibility during test target configure
-	- Header ODR linker errors for math utilities
+- Local user verification confirmed configure/build/test issues were surfaced and resolved during implementation:
+  - OpenMP target visibility during test target configure
+  - Header ODR linker errors in `src/math_utils.hpp`
+  - Header ODR linker errors in `src/diagnostics.hpp`
+  - Force-swap regression test failure fixed by one-way pending-force consumption
+- User-provided coverage report after the second pass:
+  - `src/adaptive_quadtree.hpp`: 100%
+  - `src/fmm_tree.hpp`: 100%
+  - `src/local_expansion.hpp`: 100%
+  - `src/multipole_expansion.hpp`: 100%
+  - `src/math_utils.hpp`: 100%
+  - `src/diagnostics.hpp`: 100%
+  - `src/force_swap.hpp`: 100%
+  - `src/sim_options.hpp`: 97%
+  - `src/barnes_hut_tree.hpp`: 94%
+  - `src/main.cpp`: 0% (runtime loop not yet exercised by automated tests)
+  - Total coverage: 66%
 - IDE diagnostics report no errors in newly added/edited test source files and related headers.
-- Full `ctest` run across the expanded suite is pending local shell execution.
+
+## Coverage Iteration Notes (Pass 2)
+- Added additional parser regression coverage in `tests/test_regressions.cpp`:
+  - help short-circuit path
+  - missing value errors
+  - invalid integer errors
+  - unknown argument errors
+  - rebuild lower-bound validation
+  - zero-total-body validation
+  - negative black-hole validation
+  - successful mixed-option parse path
+- Added quadtree BFS coverage in `tests/test_quadtree_invariants.cpp`:
+  - null-root early return
+  - level-order traversal with child enqueue paths
+- Added FMM/Barnes-Hut utility path coverage in `tests/test_fmm_accuracy.cpp`:
+  - FMM single-leaf build path and `getBoxGeometries()`
+  - Barnes-Hut `getBoxGeometries()` usage after build
 
 ## Rollback
 Disable testing targets in CMake and remove new tests directory/documentation, restoring the previous build-only workflow.
 
 ## Completion Artifact
 An automated CTest suite runs locally, includes deterministic numerical and regression tests for core algorithms, includes clear onboarding docs in `tests/README.md`, and produces coverage output showing broad exercise of source modules.
+
+## Completion Notes
+- Completed all planned phases 1 through 7 for local testing and coverage workflow.
+- Added root-level workflow documentation in `README.md` to prevent Debug/Coverage vs Release build confusion.
+- Left runtime-loop coverage in `src/main.cpp` as a known follow-up opportunity (requires bounded runtime smoke execution path).
 
 ## Plan
 1. Testing scaffold

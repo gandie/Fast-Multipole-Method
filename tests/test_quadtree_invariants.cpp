@@ -120,3 +120,36 @@ TEST_CASE("FMM tree leaves partition the source array without gaps", "[invariant
     verifyLeafPartitionAndCoverage(tree, sources.size());
     REQUIRE(tree.forces.size() == sources.size());
 }
+
+TEST_CASE("BFS returns immediately when root is null", "[quadtree][bfs]") {
+    fmm::QuadTree<fmm::BaseNode> tree;
+
+    int visited = 0;
+    tree.BFS([&visited](uint32_t) {
+        visited++;
+    });
+
+    REQUIRE(visited == 0);
+}
+
+TEST_CASE("BFS visits nodes level-by-level", "[quadtree][bfs]") {
+    fmm::QuadTree<fmm::BaseNode> tree;
+    tree.arena.resize(4);
+    tree.root_id = 0;
+
+    tree.arena[0].children = {1, 2, fmm::NULL_NODE, fmm::NULL_NODE};
+    tree.arena[1].children = {3, fmm::NULL_NODE, fmm::NULL_NODE, fmm::NULL_NODE};
+    tree.arena[2].children = {fmm::NULL_NODE, fmm::NULL_NODE, fmm::NULL_NODE, fmm::NULL_NODE};
+    tree.arena[3].children = {fmm::NULL_NODE, fmm::NULL_NODE, fmm::NULL_NODE, fmm::NULL_NODE};
+
+    std::vector<uint32_t> visit_order;
+    tree.BFS([&visit_order](uint32_t node_id) {
+        visit_order.push_back(node_id);
+    });
+
+    REQUIRE(visit_order.size() == 4);
+    REQUIRE(visit_order[0] == 0);
+    REQUIRE(visit_order[1] == 1);
+    REQUIRE(visit_order[2] == 2);
+    REQUIRE(visit_order[3] == 3);
+}

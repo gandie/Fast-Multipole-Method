@@ -4,6 +4,49 @@ The mathematics: [https://www.youtu.be/FhMftauQZqU](https://youtu.be/FhMftauQZqU
 
 The implementation and testing: [https://youtu.be/uOahsDhVZaE](https://youtu.be/uOahsDhVZaE)
 
+## Project Workflow (Read This First)
+
+This repository uses separate build directories for different workflows. Do not reuse one build directory for everything.
+
+- `build-release`: normal day-to-day Release builds and test runs
+- `build-coverage`: Debug + coverage instrumentation runs
+
+Using separate directories prevents CMake cache and compiler-flag confusion.
+
+### Normal Build and Test (Release)
+
+Run from repository root:
+
+```bash
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DENABLE_COVERAGE=OFF
+cmake --build build-release
+ctest --test-dir build-release --output-on-failure
+```
+
+### Coverage Build and Test (Debug)
+
+Run from repository root:
+
+```bash
+cmake -S . -B build-coverage -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABLE_COVERAGE=ON
+cmake --build build-coverage
+ctest --test-dir build-coverage --output-on-failure
+gcovr --root . --filter src --exclude build --exclude build-release --exclude build-coverage --exclude venv --exclude _deps
+```
+
+### If Build State Gets Messy
+
+Delete only the affected build directory and reconfigure:
+
+```bash
+rm -rf build-release
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DENABLE_COVERAGE=OFF
+```
+
+### Detailed Testing Guide
+
+For test file layout, naming/tagging conventions, and adding new tests, see [tests/README.md](tests/README.md).
+
 
 # CMake SFML Project Template
 
