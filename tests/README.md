@@ -10,6 +10,7 @@ This directory contains the local automated test suite for core numerical logic.
 - `test_barnes_hut_accuracy.cpp`: conservative accuracy checks against exact-force diagnostics.
 - `test_fmm_accuracy.cpp`: conservative accuracy checks against exact-force diagnostics.
 - `test_regressions.cpp`: regression checks for CLI validation and stale force-swap safety.
+- `test_simulation_engine.cpp`: deterministic engine API and stepping behavior coverage.
 
 ## How Tests Are Built
 
@@ -22,21 +23,27 @@ This directory contains the local automated test suite for core numerical logic.
 From repository root:
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build --config Release
-ctest --test-dir build --output-on-failure
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DENABLE_COVERAGE=OFF
+cmake --build build-release
+ctest --test-dir build-release --output-on-failure
+```
+
+Run the release executable:
+
+```bash
+./build-release/bin/sim
 ```
 
 Run with verbose listing:
 
 ```bash
-ctest --test-dir build --output-on-failure -V
+ctest --test-dir build-release --output-on-failure -V
 ```
 
 Run tests matching a label substring:
 
 ```bash
-ctest --test-dir build --output-on-failure -R expansion
+ctest --test-dir build-release --output-on-failure -R expansion
 ```
 
 ## Optional Coverage Run
@@ -45,9 +52,15 @@ From repository root:
 
 ```bash
 cmake -S . -B build-coverage -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
-cmake --build build-coverage --config Debug
+cmake --build build-coverage
 ctest --test-dir build-coverage --output-on-failure
-gcovr --root . --filter src --exclude 'build|build-coverage|venv|_deps'
+gcovr --root . --filter src --exclude build --exclude build-release --exclude build-coverage --exclude venv --exclude _deps
+```
+
+Run the coverage executable:
+
+```bash
+./build-coverage/bin/sim
 ```
 
 If `gcovr` is missing, install it in your active environment first.

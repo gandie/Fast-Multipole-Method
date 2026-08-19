@@ -5,6 +5,8 @@ add_executable(unit_tests
     test_barnes_hut_accuracy.cpp
     test_fmm_accuracy.cpp
     test_regressions.cpp
+    test_simulation_engine.cpp
+    ../src/simulation_engine.cpp
 )
 
 target_include_directories(unit_tests PRIVATE

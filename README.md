@@ -21,6 +21,7 @@ Run from repository root:
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DENABLE_COVERAGE=OFF
 cmake --build build-release
 ctest --test-dir build-release --output-on-failure
+./build-release/bin/sim
 ```
 
 ### Coverage Build and Test (Debug)
@@ -32,6 +33,7 @@ cmake -S . -B build-coverage -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABL
 cmake --build build-coverage
 ctest --test-dir build-coverage --output-on-failure
 gcovr --root . --filter src --exclude build --exclude build-release --exclude build-coverage --exclude venv --exclude _deps
+./build-coverage/bin/sim
 ```
 
 ### If Build State Gets Messy
