@@ -16,7 +16,10 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(sim src/main.cpp)
+add_executable(sim
+    src/main.cpp
+    src/simulation_engine.cpp
+)
 
 include(FetchContent)
 FetchContent_Declare(SFML

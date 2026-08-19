@@ -1,9 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <random>
 #include <vector>
 
 #include "force_swap.hpp"
 #include "sim_options.hpp"
+#include "spawn_utils.hpp"
 
 TEST_CASE("orbit bodies require positive black hole mass", "[regression][cli]") {
     const std::vector<std::string> args{"--orbit", "10"};
@@ -121,4 +124,40 @@ TEST_CASE("force swap succeeds when vector sizes match", "[regression][async]") 
     REQUIRE(pending_forces.empty());
     REQUIRE(current_forces[0] == Complex{4.0, 5.0});
     REQUIRE(current_forces[1] == Complex{6.0, 7.0});
+}
+
+TEST_CASE("border-adjacent spawn points stay within simulation bounds", "[regression][spawn]") {
+    std::mt19937 gen(42);
+    constexpr int screen_size = 1380;
+    constexpr double radius = 80.0;
+
+    for (int i = 0; i < 500; ++i) {
+        const auto [x, y] = sim::sampleSpawnPointWithinBounds(20.0, 15.0, radius, screen_size, gen);
+        REQUIRE(x >= 100.0);
+        REQUIRE(x <= static_cast<double>(screen_size - 100));
+        REQUIRE(y >= 100.0);
+        REQUIRE(y <= static_cast<double>(screen_size - 100));
+    }
+}
+
+TEST_CASE("corner clicks do not collapse spawn to one point", "[regression][spawn]") {
+    std::mt19937 gen(7);
+    constexpr int screen_size = 1380;
+    constexpr double radius = 50.0;
+
+    double min_x = 1e9;
+    double max_x = -1e9;
+    double min_y = 1e9;
+    double max_y = -1e9;
+
+    for (int i = 0; i < 400; ++i) {
+        const auto [x, y] = sim::sampleSpawnPointWithinBounds(0.0, 0.0, radius, screen_size, gen);
+        min_x = std::min(min_x, x);
+        max_x = std::max(max_x, x);
+        min_y = std::min(min_y, y);
+        max_y = std::max(max_y, y);
+    }
+
+    REQUIRE((max_x - min_x) > 1.0);
+    REQUIRE((max_y - min_y) > 1.0);
 }
