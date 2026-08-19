@@ -8,6 +8,8 @@
 #include <complex>
 #include <vector>
 #include <limits>
+#include <iomanip>
+#include <stdexcept>
 
 #include "adaptive_quadtree.hpp"
 
@@ -74,7 +76,7 @@ public:
 
 };
 
-std::vector<Source> readFile (const std::string &filename) {
+inline std::vector<Source> readFile (const std::string &filename) {
     std::ifstream ifile(filename);
     if (!ifile.is_open()) throw std::runtime_error("Could not open file: " + filename);
 
@@ -91,7 +93,7 @@ std::vector<Source> readFile (const std::string &filename) {
     return sources;
 }
 
-void toFile (const std::vector<Source> &sources, const std::string &filename) {
+inline void toFile (const std::vector<Source> &sources, const std::string &filename) {
     std::ofstream ofile(filename);
     if (!ofile.is_open()) throw std::runtime_error("Could not open file: " + filename);
 

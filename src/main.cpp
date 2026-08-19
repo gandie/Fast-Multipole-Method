@@ -16,6 +16,8 @@
 #include "fmm_tree.hpp"
 #include "barnes_hut_tree.hpp"
 #include "diagnostics.hpp"
+#include "sim_options.hpp"
+#include "force_swap.hpp"
 
 void printHelp() {
     std::cout << "FMM Simulation - N-body simulation using Fast Multipole Method\n\n"
@@ -67,10 +69,7 @@ struct AsyncTreeBuilder {
     bool trySwapForces(std::vector<Complex>& current_forces) {
         if (!building.load()) {
             std::lock_guard<std::mutex> lock(forces_mutex);
-            if (!pending_forces.empty()) {
-                current_forces.swap(pending_forces);
-                return true;
-            }
+            return sim::trySwapPendingForces(current_forces, pending_forces);
         }
         return false;
     }
@@ -134,88 +133,28 @@ void removeParticles(std::vector<fmm::Source>& sources, const sf::Vector2f& curs
     }
 }
 
-std::optional<int> parseIntArg(int argc, char* argv[], int& i) {
-    if (i + 1 >= argc) {
-        std::cerr << "Error: argument requires a value\n";
-        return std::nullopt;
-    }
-    try {
-        return std::stoi(argv[++i]);
-    } catch (...) {
-        std::cerr << "Error: invalid integer value: " << argv[i] << "\n";
-        return std::nullopt;
-    }
-}
-
 int main(int argc, char* argv[]) {
-    // Default values
-    int rebuild_every = 1;
-    int cluster_bodies = 40000;
-    int uniform_bodies = 10000;
-    int orbit_bodies = 0;
-    double black_hole_mass = 0.0;  // 0 = disabled
+    std::vector<std::string> cli_args;
+    cli_args.reserve(argc > 1 ? static_cast<size_t>(argc - 1) : 0);
+    for (int i = 1; i < argc; ++i) cli_args.emplace_back(argv[i]);
 
-    // Parse command-line arguments
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        
-        if (arg == "-h" || arg == "--help") {
-            printHelp();
-            return 0;
-        }
-        else if (arg == "-r" || arg == "--rebuild-every") {
-            auto val = parseIntArg(argc, argv, i);
-            if (!val) return 1;
-            rebuild_every = *val;
-        }
-        else if (arg == "-c" || arg == "--cluster-bodies") {
-            auto val = parseIntArg(argc, argv, i);
-            if (!val) return 1;
-            cluster_bodies = *val;
-        }
-        else if (arg == "-u" || arg == "--uniform-bodies") {
-            auto val = parseIntArg(argc, argv, i);
-            if (!val) return 1;
-            uniform_bodies = *val;
-        }
-        else if (arg == "-o" || arg == "--orbit") {
-            auto val = parseIntArg(argc, argv, i);
-            if (!val) return 1;
-            orbit_bodies = *val;
-        }
-        else if (arg == "-b" || arg == "--black-hole") {
-            auto val = parseIntArg(argc, argv, i);
-            if (!val) return 1;
-            black_hole_mass = *val;
-        }
-        else {
-            std::cerr << "Error: unknown argument: " << arg << "\n";
-            std::cerr << "Use -h or --help for usage information\n";
-            return 1;
-        }
+    const sim::ParseResult parsed = sim::parseSimulationArgs(cli_args);
+    if (parsed.options.help_requested) {
+        printHelp();
+        return 0;
+    }
+    if (!parsed.ok) {
+        std::cerr << parsed.error_message << "\n";
+        std::cerr << "Use -h or --help for usage information\n";
+        return 1;
     }
 
-    // Validate inputs
-    if (rebuild_every < 1) {
-        std::cerr << "Error: rebuild-every must be >= 1\n";
-        return 1;
-    }
-    if (cluster_bodies < 0 || uniform_bodies < 0 || orbit_bodies < 0) {
-        std::cerr << "Error: body counts cannot be negative\n";
-        return 1;
-    }
-    if (cluster_bodies + uniform_bodies + orbit_bodies == 0) {
-        std::cerr << "Error: total body count must be > 0\n";
-        return 1;
-    }
-    if (black_hole_mass < 0.0) {
-        std::cerr << "Error: black hole mass cannot be negative\n";
-        return 1;
-    }
-    if (orbit_bodies > 0 && black_hole_mass <= 0.0) {
-        std::cerr << "Error: orbit bodies require --black-hole with positive mass\n";
-        return 1;
-    }
+    const int rebuild_every = parsed.options.rebuild_every;
+    const int cluster_bodies = parsed.options.cluster_bodies;
+    const int uniform_bodies = parsed.options.uniform_bodies;
+    const int orbit_bodies = parsed.options.orbit_bodies;
+    const double black_hole_mass = parsed.options.black_hole_mass;
+
     sf::Color p_color = sf::Color::Cyan;
     const int screen_size = 1380;
     sf::RenderWindow window(sf::VideoMode({screen_size, screen_size}), "Simulation");

@@ -1,6 +1,18 @@
 cmake_minimum_required(VERSION 3.28)
 project(CMakeSFMLProject LANGUAGES CXX)
 
+include(CTest)
+option(ENABLE_COVERAGE "Enable coverage flags for GCC/Clang" OFF)
+
+if(ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(-O0 -g --coverage)
+        add_link_options(--coverage)
+    else()
+        message(WARNING "ENABLE_COVERAGE is ON but compiler does not support GNU/Clang coverage flags")
+    endif()
+endif()
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_CXX_STANDARD 20)
 
@@ -16,10 +28,22 @@ FetchContent_Declare(SFML
 )
 FetchContent_MakeAvailable(SFML)
 
+find_package(OpenMP REQUIRED)
+
+if(BUILD_TESTING)
+    FetchContent_Declare(Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.7.1
+        GIT_SHALLOW ON
+        EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(Catch2)
+    add_subdirectory(tests)
+endif()
+
 target_compile_features(sim PRIVATE cxx_std_20)
 target_link_libraries(sim PRIVATE sfml-graphics sfml-window sfml-system)
 
-find_package(OpenMP REQUIRED)
 target_link_libraries(sim PRIVATE OpenMP::OpenMP_CXX)
 
 # Keep only if needed on Apple

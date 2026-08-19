@@ -5,3 +5,4 @@ out
 .vs
 .vscode
 bin
+build-coverage

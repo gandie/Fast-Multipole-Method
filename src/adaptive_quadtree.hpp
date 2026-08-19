@@ -9,6 +9,8 @@
 #include <queue>
 #include <array>
 #include <cstdint>
+#include <tuple>
+#include <functional>
 
 using Complex = std::complex<double>; 
 
