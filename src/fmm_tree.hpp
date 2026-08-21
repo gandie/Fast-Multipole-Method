@@ -76,6 +76,8 @@ public:
 
         if (is_leaf) { // root is small enough
             this->height = 0;
+            // For a single-leaf tree, near interactions are sourced from the root itself.
+            arena[root_id].near_neighbors.push_back(root_id);
             computeForces();
             return;
         }

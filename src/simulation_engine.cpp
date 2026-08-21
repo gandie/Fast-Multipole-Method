@@ -96,9 +96,15 @@ void SimulationEngine::addParticles(std::vector<fmm::Source>& sources,
 void SimulationEngine::removeParticles(std::vector<fmm::Source>& sources,
                                        double x,
                                        double y,
-                                       double radius) {
+                                       double radius,
+                                       double protected_mass) {
     auto it = sources.begin();
     while (it != sources.end()) {
+        if (protected_mass > 0.0 && it->q >= protected_mass * 0.9) {
+            ++it;
+            continue;
+        }
+
         const double dx = it->position.real() - x;
         const double dy = it->position.imag() - y;
         const double dist = std::sqrt(dx * dx + dy * dy);
@@ -276,7 +282,7 @@ void SimulationEngine::removeParticlesAt(double x, double y) {
         auto lock = async_builder_.lockSourcesScoped();
         const std::size_t old_size = sources_.size();
 
-        removeParticles(sources_, x, y, interaction_radius_);
+        removeParticles(sources_, x, y, interaction_radius_, options_.black_hole_mass);
         size_changed = (sources_.size() != old_size);
     }
 

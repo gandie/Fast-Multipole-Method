@@ -1,10 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <vector>
 
 #include "barnes_hut_tree.hpp"
 #include "diagnostics.hpp"
 #include "fmm_tree.hpp"
+
+using Catch::Approx;
 
 namespace {
 
@@ -51,6 +54,24 @@ TEST_CASE("FMM single-leaf build computes forces and exposes one box", "[accurac
     const auto boxes = tree.getBoxGeometries();
     REQUIRE(boxes.size() == 1);
     REQUIRE(boxes[0].second > 0.0);
+
+    const Complex f0 = tree.forces[0];
+    const Complex f1 = tree.forces[1];
+
+    REQUIRE(std::abs(f0) > 0.0);
+    REQUIRE(std::abs(f1) > 0.0);
+
+    constexpr double dx01 = 200.0 - 230.0;
+    constexpr double dy01 = 200.0 - 210.0;
+    constexpr double r2 = dx01 * dx01 + dy01 * dy01;
+
+    const Complex expected_f0{-1.2 * dx01 / r2, -1.2 * dy01 / r2};
+    const Complex expected_f1{-1.0 * (-dx01) / r2, -1.0 * (-dy01) / r2};
+
+    REQUIRE(f0.real() == Approx(expected_f0.real()).margin(1e-12));
+    REQUIRE(f0.imag() == Approx(expected_f0.imag()).margin(1e-12));
+    REQUIRE(f1.real() == Approx(expected_f1.real()).margin(1e-12));
+    REQUIRE(f1.imag() == Approx(expected_f1.imag()).margin(1e-12));
 }
 
 TEST_CASE("Barnes-Hut exposes box geometries after build", "[accuracy][barnes-hut][boxes]") {

@@ -81,7 +81,8 @@ private:
     static void removeParticles(std::vector<fmm::Source>& sources,
                                 double x,
                                 double y,
-                                double radius);
+                                double radius,
+                                double protected_mass);
 
     SimulationOptions options_{};
     int screen_size_ = 0;
