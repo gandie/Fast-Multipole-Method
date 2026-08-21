@@ -13,6 +13,7 @@ struct SimulationOptions {
     int uniform_bodies = 10000;
     int orbit_bodies = 0;
     double black_hole_mass = 0.0;
+    std::string scenario_file;
     bool help_requested = false;
 };
 
@@ -56,6 +57,22 @@ inline ParseResult parseSimulationArgs(const std::vector<std::string>& args) {
             return true;
         };
 
+        auto parseStringArg = [&](std::string_view arg_name, std::string& output) -> bool {
+            if (i + 1 >= args.size()) {
+                result.ok = false;
+                result.error_message = "Error: argument requires a value: " + std::string(arg_name);
+                return false;
+            }
+            output = args[i + 1];
+            if (output.empty()) {
+                result.ok = false;
+                result.error_message = "Error: argument value cannot be empty: " + std::string(arg_name);
+                return false;
+            }
+            ++i;
+            return true;
+        };
+
         if (arg == "-h" || arg == "--help") {
             result.options.help_requested = true;
             return result;
@@ -82,6 +99,10 @@ inline ParseResult parseSimulationArgs(const std::vector<std::string>& args) {
             result.options.black_hole_mass = static_cast<double>(black_hole_mass_int);
             continue;
         }
+        if (arg == "-s" || arg == "--scenario") {
+            if (!parseStringArg(arg, result.options.scenario_file)) return result;
+            continue;
+        }
 
         result.ok = false;
         result.error_message = "Error: unknown argument: " + arg;
@@ -93,6 +114,12 @@ inline ParseResult parseSimulationArgs(const std::vector<std::string>& args) {
         result.error_message = "Error: rebuild-every must be >= 1";
         return result;
     }
+
+    if (!result.options.scenario_file.empty()) {
+        // Scenario mode ignores generated body controls by policy.
+        return result;
+    }
+
     if (result.options.cluster_bodies < 0 || result.options.uniform_bodies < 0 || result.options.orbit_bodies < 0) {
         result.ok = false;
         result.error_message = "Error: body counts cannot be negative";

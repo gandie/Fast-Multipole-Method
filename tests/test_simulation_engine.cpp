@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 #include "simulation_engine.hpp"
@@ -264,4 +266,65 @@ TEST_CASE("black hole cannot be removed via interaction radius", "[engine][regre
     REQUIRE(black_hole != nullptr);
     REQUIRE(black_hole->position.real() == Approx(690.0));
     REQUIRE(black_hole->position.imag() == Approx(690.0));
+}
+
+TEST_CASE("scenario file initializes deterministic engine bodies", "[engine][scenario]") {
+        const std::filesystem::path temp_path =
+                std::filesystem::temp_directory_path() / "fmm_engine_scenario.json";
+
+        std::ofstream out(temp_path);
+        REQUIRE(out.is_open());
+        out << R"({
+    "metadata": {"name": "engine-init"},
+    "bodies": [
+        {"mass": 4.0, "position": [100.0, 200.0], "velocity": [1.5, -2.0]},
+        {"charge": 1.0, "position": [300.0, 400.0], "velocity": [-0.5, 0.25]}
+    ]
+})";
+        out.close();
+
+        sim::SimulationOptions options = smallOptions();
+        options.cluster_bodies = 999;
+        options.uniform_bodies = 999;
+        options.orbit_bodies = 999;
+        options.black_hole_mass = 50000.0;
+        options.scenario_file = temp_path.string();
+
+        sim::SimulationEngine engine(options, 1380);
+        REQUIRE(engine.particleCount() == 2);
+
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources[0].position.real() == Approx(100.0));
+        REQUIRE(sources[0].position.imag() == Approx(200.0));
+        REQUIRE(sources[0].velocity.real() == Approx(1.5));
+        REQUIRE(sources[0].velocity.imag() == Approx(-2.0));
+        REQUIRE(sources[0].q == Approx(4.0));
+}
+
+TEST_CASE("scenario mode does not pin pseudo black-hole mass", "[engine][scenario]") {
+        const std::filesystem::path temp_path =
+                std::filesystem::temp_directory_path() / "fmm_engine_scenario_unpinned.json";
+
+        std::ofstream out(temp_path);
+        REQUIRE(out.is_open());
+        out << R"({
+    "metadata": {},
+    "bodies": [
+        {"mass": 100000.0, "position": [200.0, 300.0], "velocity": [10.0, 0.0]}
+    ]
+})";
+        out.close();
+
+        sim::SimulationOptions options = smallOptions();
+        options.scenario_file = temp_path.string();
+        options.black_hole_mass = 100000.0;
+
+        sim::SimulationEngine engine(options, 1380);
+        engine.step(1e-3);
+
+        auto lock = engine.lockSources();
+        const auto& body = engine.sources().front();
+        REQUIRE(body.position.real() > 200.0);
+        REQUIRE(body.position.imag() == Approx(300.0));
 }

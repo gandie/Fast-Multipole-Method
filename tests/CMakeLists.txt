@@ -15,6 +15,7 @@ target_include_directories(unit_tests PRIVATE
 
 target_link_libraries(unit_tests PRIVATE
     Catch2::Catch2WithMain
+    nlohmann_json::nlohmann_json
     OpenMP::OpenMP_CXX
 )
 

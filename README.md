@@ -24,6 +24,42 @@ ctest --test-dir build-release --output-on-failure
 ./build-release/bin/sim
 ```
 
+### Scenario File Input (JSON)
+
+The simulator accepts a scenario file via `--scenario <path>`.
+
+- Scenario mode loads bodies from file and overrides generated-body flags (`-c`, `-u`, `-o`, `-b`).
+- Non-generation controls like `--rebuild-every` still apply.
+- If the file is malformed or incompatible, startup fails with an explicit error.
+
+Minimal schema:
+
+```json
+{
+   "metadata": {
+      "name": "optional",
+      "description": "optional"
+   },
+   "bodies": [
+      {
+         "mass": 10.0,
+         "position": [690.0, 690.0],
+         "velocity": [0.0, 0.0]
+      },
+      {
+         "charge": 1.0,
+         "position": [780.0, 690.0],
+         "velocity": [0.0, 180.0]
+      }
+   ]
+}
+```
+
+Notes:
+- `metadata` is optional and informational only.
+- Each body requires `position`, `velocity`, and either `mass` or `charge`.
+- If both `mass` and `charge` are present, `mass` is used.
+
 ### Coverage Build and Test (Debug)
 
 Run from repository root:

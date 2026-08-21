@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <mutex>
 #include <random>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -23,6 +24,14 @@ struct EngineFrameStats {
     float ema_build_ms = 0.0f;
     float max_build_ms = 0.0f;
 };
+
+struct ScenarioLoadResult {
+    bool ok = false;
+    std::vector<fmm::Source> sources;
+    std::string error_message;
+};
+
+ScenarioLoadResult loadScenarioFromFile(const std::string& file_path);
 
 class SimulationEngine {
 public:

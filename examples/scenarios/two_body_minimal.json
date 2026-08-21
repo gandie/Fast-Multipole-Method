@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "name": "two-body-minimal",
+    "description": "Minimal two-body setup for deterministic checks."
+  },
+  "bodies": [
+    {
+      "mass": 10.0,
+      "position": [600.0, 690.0],
+      "velocity": [0.0, 0.0]
+    },
+    {
+      "mass": 1.0,
+      "position": [780.0, 690.0],
+      "velocity": [0.0, 220.0]
+    }
+  ]
+}

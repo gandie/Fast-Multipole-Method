@@ -11,6 +11,7 @@ This directory contains the local automated test suite for core numerical logic.
 - `test_fmm_accuracy.cpp`: conservative accuracy checks against exact-force diagnostics.
 - `test_regressions.cpp`: regression checks for CLI validation and stale force-swap safety.
 - `test_simulation_engine.cpp`: deterministic engine API and stepping behavior coverage.
+- Scenario-file ingestion coverage lives in `test_regressions.cpp` and `test_simulation_engine.cpp`.
 
 ## How Tests Are Built
 
@@ -32,6 +33,12 @@ Run the release executable:
 
 ```bash
 ./build-release/bin/sim
+```
+
+Run with a scenario file:
+
+```bash
+./build-release/bin/sim --scenario path/to/scenario.json
 ```
 
 Run with verbose listing:

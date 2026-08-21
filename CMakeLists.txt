@@ -31,6 +31,14 @@ FetchContent_Declare(SFML
 )
 FetchContent_MakeAvailable(SFML)
 
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW ON
+    EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 find_package(OpenMP REQUIRED)
 
 if(BUILD_TESTING)
@@ -46,6 +54,7 @@ endif()
 
 target_compile_features(sim PRIVATE cxx_std_20)
 target_link_libraries(sim PRIVATE sfml-graphics sfml-window sfml-system)
+target_link_libraries(sim PRIVATE nlohmann_json::nlohmann_json)
 
 target_link_libraries(sim PRIVATE OpenMP::OpenMP_CXX)
 

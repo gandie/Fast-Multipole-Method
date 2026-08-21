@@ -4,6 +4,7 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <stdexcept>
 #include <vector>
 #include "sim_options.hpp"
 #include "simulation_engine.hpp"
@@ -18,86 +19,89 @@ void printHelp() {
               << "  -u, --uniform-bodies N   Number of uniformly-distributed bodies (default: 10000)\n"
               << "  -o, --orbit N            Number of circular-orbit bodies (requires --black-hole)\n"
               << "  -b, --black-hole M       Create massive central body with mass M (default: disabled)\n\n"
+              << "  -s, --scenario FILE      Load bodies from JSON scenario file (overrides -c/-u/-o/-b)\n\n"
               << "Examples:\n"
               << "  sim                              # Run with defaults\n"
               << "  sim -r 4 -c 30000 -u 5000       # Custom rebuild/body counts\n"
               << "  sim --rebuild-every 2 --cluster-bodies 20000\n"
               << "  sim -b 100000                    # Add black hole with mass 100000\n"
-              << "  sim -b 100000 -o 2000            # Spawn 2000 orbit bodies around black hole\n";
+              << "  sim -b 100000 -o 2000            # Spawn 2000 orbit bodies around black hole\n"
+              << "  sim --scenario examples/scenarios/two_body_minimal.json\n";
 }
 
 int main(int argc, char* argv[]) {
-    std::vector<std::string> cli_args;
-    cli_args.reserve(argc > 1 ? static_cast<size_t>(argc - 1) : 0);
-    for (int i = 1; i < argc; ++i) cli_args.emplace_back(argv[i]);
+    try {
+        std::vector<std::string> cli_args;
+        cli_args.reserve(argc > 1 ? static_cast<size_t>(argc - 1) : 0);
+        for (int i = 1; i < argc; ++i) cli_args.emplace_back(argv[i]);
 
-    const sim::ParseResult parsed = sim::parseSimulationArgs(cli_args);
-    if (parsed.options.help_requested) {
-        printHelp();
-        return 0;
-    }
-    if (!parsed.ok) {
-        std::cerr << parsed.error_message << "\n";
-        std::cerr << "Use -h or --help for usage information\n";
-        return 1;
-    }
+        const sim::ParseResult parsed = sim::parseSimulationArgs(cli_args);
+        if (parsed.options.help_requested) {
+            printHelp();
+            return 0;
+        }
+        if (!parsed.ok) {
+            std::cerr << parsed.error_message << "\n";
+            std::cerr << "Use -h or --help for usage information\n";
+            return 1;
+        }
 
-    sf::Color p_color = sf::Color::Cyan;
-    const int screen_size = 1380;
-    sf::RenderWindow window(sf::VideoMode({screen_size, screen_size}), "Simulation");
-    window.setFramerateLimit(60);
+        sf::Color p_color = sf::Color::Cyan;
+        const int screen_size = 1380;
+        sf::RenderWindow window(sf::VideoMode({screen_size, screen_size}), "Simulation");
+        window.setFramerateLimit(60);
 
-    const double dt = 0.001;
+        const double dt = 0.001;
 
-    sf::Clock frameTimer;
-    sf::Clock renderClock;
-    sf::Clock uiTimer;
+        sf::Clock frameTimer;
+        sf::Clock renderClock;
+        sf::Clock uiTimer;
 
-    // Font loading with fallbacks
-    sf::Font font;
-    bool canDrawText = false;
-    {
-        const std::vector<std::string> fontCandidates = {
-            "assets/fonts/JetBrainsMonoNL-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
-            "/Library/Fonts/JetBrainsMonoNL-Regular.ttf"
-        };
+        // Font loading with fallbacks
+        sf::Font font;
+        bool canDrawText = false;
+        {
+            const std::vector<std::string> fontCandidates = {
+                "assets/fonts/JetBrainsMonoNL-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+                "/Library/Fonts/JetBrainsMonoNL-Regular.ttf"
+            };
 
-        for (const auto& path : fontCandidates) {
-            if (font.openFromFile(path)) {
-                std::cout << "Loaded font: " << path << "\n";
-                canDrawText = true;
-                break;
+            for (const auto& path : fontCandidates) {
+                if (font.openFromFile(path)) {
+                    std::cout << "Loaded font: " << path << "\n";
+                    canDrawText = true;
+                    break;
+                }
+            }
+
+            if (!canDrawText) {
+                std::cerr << "Warning: no font loaded. Overlay text disabled.\n";
             }
         }
 
-        if (!canDrawText) {
-            std::cerr << "Warning: no font loaded. Overlay text disabled.\n";
+        sim::SimulationEngine engine(parsed.options, screen_size);
+
+        bool drawBoxes = false;
+
+        const double radius_step = 5.0;
+
+        // Reused draw buffers
+        sf::VertexArray particle_va(sf::PrimitiveType::Points, engine.particleCount());
+        for (size_t i = 0; i < particle_va.getVertexCount(); ++i) {
+            particle_va[i].color = p_color;
         }
-    }
 
-    sim::SimulationEngine engine(parsed.options, screen_size);
+        sf::Text overlay(font, "", 20);
+        overlay.setFillColor(sf::Color::White);
+        overlay.setPosition({10.f, 8.f});
 
-    bool drawBoxes = false;
+        float tRenderMs = 0.f;
+        float tFrameMs = 0.f;
+        size_t particle_count_snapshot = particle_va.getVertexCount();
 
-    const double radius_step = 5.0;
-
-    // Reused draw buffers
-    sf::VertexArray particle_va(sf::PrimitiveType::Points, engine.particleCount());
-    for (size_t i = 0; i < particle_va.getVertexCount(); ++i) {
-        particle_va[i].color = p_color;
-    }
-
-    sf::Text overlay(font, "", 20);
-    overlay.setFillColor(sf::Color::White);
-    overlay.setPosition({10.f, 8.f});
-
-    float tRenderMs = 0.f;
-    float tFrameMs = 0.f;
-    size_t particle_count_snapshot = particle_va.getVertexCount();
-
-    while (window.isOpen()) {
+        while (window.isOpen()) {
         frameTimer.restart();
 
         while (const std::optional event = window.pollEvent()) {
@@ -211,7 +215,11 @@ int main(int argc, char* argv[]) {
         }
 
         window.display();
-    }
+        }
 
-    return 0;
+        return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << ex.what() << "\n";
+        return 1;
+    }
 }

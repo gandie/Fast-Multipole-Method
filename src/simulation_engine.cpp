@@ -3,17 +3,144 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
+#include <stdexcept>
 
+#include <nlohmann/json.hpp>
 #include <omp.h>
 
 #include "spawn_utils.hpp"
 
 namespace sim {
 namespace {
+using nlohmann::json;
+
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRadiusStepMin = 10.0;
 constexpr double kRadiusStepMax = 300.0;
 constexpr float kEmaAlpha = 0.10f;
+
+bool parseFiniteNumber(const json& value, const char* field_name, double& out, std::string& error_message) {
+    if (!value.is_number()) {
+        error_message = std::string("Error: scenario field '") + field_name + "' must be a number";
+        return false;
+    }
+
+    out = value.get<double>();
+    if (!std::isfinite(out)) {
+        error_message = std::string("Error: scenario field '") + field_name + "' must be finite";
+        return false;
+    }
+
+    return true;
+}
+
+bool parseVector2Array(const json& value, const char* field_name, Complex& out, std::string& error_message) {
+    if (!value.is_array() || value.size() != 2) {
+        error_message = std::string("Error: scenario field '") + field_name + "' must be an array of 2 numbers";
+        return false;
+    }
+
+    double x = 0.0;
+    double y = 0.0;
+    if (!parseFiniteNumber(value[0], field_name, x, error_message)) return false;
+    if (!parseFiniteNumber(value[1], field_name, y, error_message)) return false;
+
+    out = Complex{x, y};
+    return true;
+}
+
+bool parseBodyCharge(const json& body, double& out_q, std::string& error_message) {
+    if (body.contains("mass")) {
+        if (!parseFiniteNumber(body.at("mass"), "mass", out_q, error_message)) return false;
+        return true;
+    }
+
+    if (body.contains("charge")) {
+        if (!parseFiniteNumber(body.at("charge"), "charge", out_q, error_message)) return false;
+        return true;
+    }
+
+    error_message = "Error: each scenario body requires either 'mass' or 'charge'";
+    return false;
+}
+}
+
+ScenarioLoadResult loadScenarioFromFile(const std::string& file_path) {
+    ScenarioLoadResult result;
+
+    std::ifstream input(file_path);
+    if (!input.is_open()) {
+        result.error_message = "Error: failed to open scenario file: " + file_path;
+        return result;
+    }
+
+    json root;
+    try {
+        input >> root;
+    } catch (const std::exception& ex) {
+        result.error_message = "Error: malformed scenario JSON in " + file_path + ": " + ex.what();
+        return result;
+    }
+
+    if (!root.is_object()) {
+        result.error_message = "Error: scenario root must be a JSON object";
+        return result;
+    }
+
+    if (root.contains("metadata") && !root.at("metadata").is_object()) {
+        result.error_message = "Error: scenario 'metadata' must be an object when provided";
+        return result;
+    }
+
+    if (!root.contains("bodies") || !root.at("bodies").is_array()) {
+        result.error_message = "Error: scenario must contain a 'bodies' array";
+        return result;
+    }
+
+    const json& bodies = root.at("bodies");
+    if (bodies.empty()) {
+        result.error_message = "Error: scenario 'bodies' array must not be empty";
+        return result;
+    }
+
+    result.sources.reserve(bodies.size());
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+        const json& body = bodies[i];
+        if (!body.is_object()) {
+            result.error_message = "Error: scenario body at index " + std::to_string(i) + " must be an object";
+            return result;
+        }
+
+        if (!body.contains("position") || !body.contains("velocity")) {
+            result.error_message = "Error: scenario body at index " + std::to_string(i)
+                                 + " requires 'position' and 'velocity'";
+            return result;
+        }
+
+        Complex position{0.0, 0.0};
+        Complex velocity{0.0, 0.0};
+        double q = 0.0;
+
+        if (!parseVector2Array(body.at("position"), "position", position, result.error_message)) return result;
+        if (!parseVector2Array(body.at("velocity"), "velocity", velocity, result.error_message)) return result;
+        if (!parseBodyCharge(body, q, result.error_message)) return result;
+
+        if (q < 0.0) {
+            result.error_message = "Error: scenario body at index " + std::to_string(i)
+                                 + " has negative mass/charge";
+            return result;
+        }
+
+        fmm::Source source;
+        source.position = position;
+        source.velocity = velocity;
+        source.q = q;
+        result.sources.push_back(source);
+    }
+
+    result.ok = true;
+    return result;
 }
 
 void SimulationEngine::AsyncTreeBuilder::startBuild(fmm::FmmTree& tree, std::mutex& tree_mutex) {
@@ -115,6 +242,17 @@ void SimulationEngine::removeParticles(std::vector<fmm::Source>& sources,
 }
 
 void SimulationEngine::initializeSources() {
+    sources_.clear();
+
+    if (!options_.scenario_file.empty()) {
+        ScenarioLoadResult loaded = loadScenarioFromFile(options_.scenario_file);
+        if (!loaded.ok) {
+            throw std::runtime_error(loaded.error_message);
+        }
+        sources_ = std::move(loaded.sources);
+        return;
+    }
+
     int total_bodies = options_.cluster_bodies + options_.uniform_bodies + options_.orbit_bodies;
     if (options_.black_hole_mass > 0.0) total_bodies += 1;
 
@@ -177,6 +315,7 @@ void SimulationEngine::initializeSources() {
 }
 
 void SimulationEngine::pinBlackHoleLocked() {
+    if (!options_.scenario_file.empty()) return;
     if (options_.black_hole_mass <= 0.0) return;
 
     for (auto& source : sources_) {
@@ -215,7 +354,7 @@ void SimulationEngine::step(double dt) {
             current_forces_.assign(sources_.size(), Complex{0.0, 0.0});
         }
 
-        const int start_idx = (options_.black_hole_mass > 0.0) ? 1 : 0;
+        const int start_idx = (options_.scenario_file.empty() && options_.black_hole_mass > 0.0) ? 1 : 0;
         #pragma omp parallel for schedule(static)
         for (int i = start_idx; i < static_cast<int>(sources_.size()); ++i) {
             sources_[i].velocity += 0.5 * current_forces_[i] * dt;
@@ -244,7 +383,7 @@ void SimulationEngine::step(double dt) {
     phase_start = Clock::now();
     {
         auto lock = async_builder_.lockSourcesScoped();
-        const int start_idx = (options_.black_hole_mass > 0.0) ? 1 : 0;
+        const int start_idx = (options_.scenario_file.empty() && options_.black_hole_mass > 0.0) ? 1 : 0;
 
         #pragma omp parallel for schedule(static)
         for (int i = start_idx; i < static_cast<int>(sources_.size()); ++i) {
@@ -282,7 +421,8 @@ void SimulationEngine::removeParticlesAt(double x, double y) {
         auto lock = async_builder_.lockSourcesScoped();
         const std::size_t old_size = sources_.size();
 
-        removeParticles(sources_, x, y, interaction_radius_, options_.black_hole_mass);
+        const double protected_mass = options_.scenario_file.empty() ? options_.black_hole_mass : 0.0;
+        removeParticles(sources_, x, y, interaction_radius_, protected_mass);
         size_changed = (sources_.size() != old_size);
     }
 

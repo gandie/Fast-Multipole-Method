@@ -1,11 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <random>
 #include <vector>
 
 #include "force_swap.hpp"
 #include "sim_options.hpp"
+#include "simulation_engine.hpp"
 #include "spawn_utils.hpp"
 
 TEST_CASE("orbit bodies require positive black hole mass", "[regression][cli]") {
@@ -101,6 +104,63 @@ TEST_CASE("negative body counts are rejected", "[regression][cli]") {
 
     REQUIRE_FALSE(result.ok);
     REQUIRE(result.error_message == "Error: body counts cannot be negative");
+}
+
+TEST_CASE("scenario option parses and overrides generation validation", "[regression][cli]") {
+    const std::vector<std::string> args{
+        "--scenario", "fixtures/scenario.json",
+        "--cluster-bodies", "0",
+        "--uniform-bodies", "0",
+        "--orbit", "10"
+    };
+
+    const sim::ParseResult result = sim::parseSimulationArgs(args);
+
+    REQUIRE(result.ok);
+    REQUIRE(result.options.scenario_file == "fixtures/scenario.json");
+}
+
+TEST_CASE("scenario loader accepts mass and charge aliases", "[regression][scenario]") {
+    const std::filesystem::path temp_path =
+        std::filesystem::temp_directory_path() / "fmm_scenario_valid.json";
+
+    std::ofstream out(temp_path);
+    REQUIRE(out.is_open());
+    out << R"({
+  "metadata": {"name": "alias-check"},
+  "bodies": [
+    {"mass": 3.0, "charge": 5.0, "position": [10.0, 20.0], "velocity": [1.0, 2.0]},
+    {"charge": 2.5, "position": [30.0, 40.0], "velocity": [0.0, -1.0]}
+  ]
+})";
+    out.close();
+
+    const sim::ScenarioLoadResult result = sim::loadScenarioFromFile(temp_path.string());
+    REQUIRE(result.ok);
+    REQUIRE(result.sources.size() == 2);
+
+    // Mass takes precedence when both fields are present.
+    REQUIRE(result.sources[0].q == 3.0);
+    REQUIRE(result.sources[1].q == 2.5);
+}
+
+TEST_CASE("scenario loader rejects incompatible shape", "[regression][scenario]") {
+    const std::filesystem::path temp_path =
+        std::filesystem::temp_directory_path() / "fmm_scenario_invalid.json";
+
+    std::ofstream out(temp_path);
+    REQUIRE(out.is_open());
+    out << R"({"metadata": {}, "bodies": [{"mass": 1.0, "position": [1.0]}]})";
+    out.close();
+
+    const sim::ScenarioLoadResult result = sim::loadScenarioFromFile(temp_path.string());
+    REQUIRE_FALSE(result.ok);
+    const bool mentions_missing_required_fields =
+        result.error_message.find("requires 'position' and 'velocity'") != std::string::npos;
+    const bool mentions_bad_vector_shape =
+        result.error_message.find("must be an array of 2 numbers") != std::string::npos;
+    const bool has_expected_error = mentions_missing_required_fields || mentions_bad_vector_shape;
+    REQUIRE(has_expected_error);
 }
 
 TEST_CASE("force swap ignores and clears stale pending data", "[regression][async]") {

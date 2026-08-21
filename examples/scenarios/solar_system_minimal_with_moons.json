@@ -1,0 +1,47 @@
+{
+  "metadata": {
+    "name": "solar-system-minimal-with-moons",
+    "description": "Compact sun-planet-moon setup for long-run stability checks.",
+    "notes": "Velocities are seeded near circular-orbit magnitudes under current force law."
+  },
+  "bodies": [
+    {
+      "mass": 100000.0,
+      "position": [690.0, 690.0],
+      "velocity": [0.0, 0.0]
+    },
+
+    {
+      "mass": 10.0,
+      "position": [910.0, 690.0],
+      "velocity": [0.0, 316.227766]
+    },
+    {
+      "mass": 0.2,
+      "position": [910.0, 715.0],
+      "velocity": [-3.162278, 316.227766]
+    },
+
+    {
+      "mass": 6.0,
+      "position": [370.0, 690.0],
+      "velocity": [0.0, -316.227766]
+    },
+    {
+      "mass": 0.12,
+      "position": [370.0, 670.0],
+      "velocity": [2.449490, -316.227766]
+    },
+
+    {
+      "mass": 30.0,
+      "position": [690.0, 230.0],
+      "velocity": [316.227766, 0.0]
+    },
+    {
+      "mass": 0.5,
+      "position": [720.0, 230.0],
+      "velocity": [316.227766, 5.477226]
+    }
+  ]
+}

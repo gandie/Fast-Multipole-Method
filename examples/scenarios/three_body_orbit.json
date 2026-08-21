@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "name": "three-body-orbit-demo",
+    "description": "Central massive body with two orbiters and one light probe.",
+    "notes": "Mass takes precedence over charge when both are present."
+  },
+  "bodies": [
+    {
+      "mass": 40000.0,
+      "position": [690.0, 690.0],
+      "velocity": [0.0, 0.0]
+    },
+    {
+      "mass": 1.0,
+      "position": [890.0, 690.0],
+      "velocity": [0.0, 200.0]
+    },
+    {
+      "mass": 1.0,
+      "position": [490.0, 690.0],
+      "velocity": [0.0, -200.0]
+    },
+    {
+      "charge": 0.5,
+      "position": [690.0, 940.0],
+      "velocity": [-200.0, 0.0]
+    }
+  ]
+}
