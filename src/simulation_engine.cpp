@@ -143,39 +143,8 @@ ScenarioLoadResult loadScenarioFromFile(const std::string& file_path) {
     return result;
 }
 
-void SimulationEngine::AsyncTreeBuilder::startBuild(fmm::FmmTree& tree, std::mutex& tree_mutex) {
-    if (building.load()) return;
-
-    building.store(true);
-    if (worker_thread.joinable()) worker_thread.join();
-
-    worker_thread = std::thread([this, &tree, &tree_mutex]() {
-        {
-            std::lock_guard<std::mutex> source_lock(sources_mutex);
-            std::lock_guard<std::mutex> tree_lock(tree_mutex);
-            tree.buildTree();
-        }
-        {
-            std::lock_guard<std::mutex> force_lock(forces_mutex);
-            pending_forces = tree.forces;
-        }
-        building.store(false);
-    });
-}
-
-bool SimulationEngine::AsyncTreeBuilder::trySwapForces(std::vector<Complex>& current_forces) {
-    if (building.load()) return false;
-
-    std::lock_guard<std::mutex> lock(forces_mutex);
-    return sim::trySwapPendingForces(current_forces, pending_forces);
-}
-
-std::unique_lock<std::mutex> SimulationEngine::AsyncTreeBuilder::lockSourcesScoped() {
-    return std::unique_lock<std::mutex>(sources_mutex);
-}
-
-SimulationEngine::AsyncTreeBuilder::~AsyncTreeBuilder() {
-    if (worker_thread.joinable()) worker_thread.join();
+std::unique_lock<std::mutex> SimulationEngine::lockSourcesScoped() {
+    return std::unique_lock<std::mutex>(sources_mutex_);
 }
 
 SimulationEngine::SimulationEngine(const SimulationOptions& options, int screen_size)
@@ -328,16 +297,7 @@ void SimulationEngine::pinBlackHoleLocked() {
 }
 
 void SimulationEngine::rebuildTreeSynchronously() {
-    // Join before taking sources lock to avoid deadlock when worker is waiting on the same mutex.
-    if (async_builder_.worker_thread.joinable()) async_builder_.worker_thread.join();
-    async_builder_.building.store(false);
-
-    {
-        std::lock_guard<std::mutex> force_lock(async_builder_.forces_mutex);
-        async_builder_.pending_forces.clear();
-    }
-
-    auto sources_lock = async_builder_.lockSourcesScoped();
+    auto sources_lock = lockSourcesScoped();
     std::lock_guard<std::mutex> tree_lock(tree_mutex_);
     tree_.buildTree();
     current_forces_ = tree_.forces;
@@ -349,7 +309,7 @@ void SimulationEngine::step(double dt) {
 
     auto phase_start = Clock::now();
     {
-        auto lock = async_builder_.lockSourcesScoped();
+        auto lock = lockSourcesScoped();
         if (current_forces_.size() != sources_.size()) {
             current_forces_.assign(sources_.size(), Complex{0.0, 0.0});
         }
@@ -373,7 +333,7 @@ void SimulationEngine::step(double dt) {
     stats_.rebuilt_forces_this_frame = should_rebuild_now;
     if (should_rebuild_now) {
         // Enforce deterministic force freshness at configured cadence.
-        auto lock = async_builder_.lockSourcesScoped();
+        auto lock = lockSourcesScoped();
         std::lock_guard<std::mutex> tree_lock(tree_mutex_);
         tree_.buildTree();
         current_forces_ = tree_.forces;
@@ -391,7 +351,7 @@ void SimulationEngine::step(double dt) {
 
     phase_start = Clock::now();
     {
-        auto lock = async_builder_.lockSourcesScoped();
+        auto lock = lockSourcesScoped();
         const int start_idx = (options_.scenario_file.empty() && options_.black_hole_mass > 0.0) ? 1 : 0;
 
         #pragma omp parallel for schedule(static)
@@ -412,7 +372,7 @@ void SimulationEngine::step(double dt) {
 void SimulationEngine::addParticlesAt(double x, double y, int count) {
     bool size_changed = false;
     {
-        auto lock = async_builder_.lockSourcesScoped();
+        auto lock = lockSourcesScoped();
         const std::size_t old_size = sources_.size();
 
         addParticles(sources_, x, y, interaction_radius_, gen_, screen_size_, count);
@@ -427,7 +387,7 @@ void SimulationEngine::addParticlesAt(double x, double y, int count) {
 void SimulationEngine::removeParticlesAt(double x, double y) {
     bool size_changed = false;
     {
-        auto lock = async_builder_.lockSourcesScoped();
+        auto lock = lockSourcesScoped();
         const std::size_t old_size = sources_.size();
 
         const double protected_mass = options_.scenario_file.empty() ? options_.black_hole_mass : 0.0;
@@ -457,12 +417,12 @@ int SimulationEngine::rebuildEvery() const noexcept {
 }
 
 std::size_t SimulationEngine::particleCount() {
-    auto lock = async_builder_.lockSourcesScoped();
+    auto lock = lockSourcesScoped();
     return sources_.size();
 }
 
 std::unique_lock<std::mutex> SimulationEngine::lockSources() {
-    return async_builder_.lockSourcesScoped();
+    return lockSourcesScoped();
 }
 
 const std::vector<fmm::Source>& SimulationEngine::sources() const noexcept {

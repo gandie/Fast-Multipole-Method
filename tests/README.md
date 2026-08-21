@@ -9,7 +9,7 @@ This directory contains the local automated test suite for core numerical logic.
 - `test_expansions.cpp`: deterministic checks for multipole and local expansion behavior against direct computations.
 - `test_barnes_hut_accuracy.cpp`: conservative accuracy checks against exact-force diagnostics.
 - `test_fmm_accuracy.cpp`: conservative accuracy checks against exact-force diagnostics.
-- `test_regressions.cpp`: regression checks for CLI validation and stale force-swap safety.
+- `test_regressions.cpp`: regression checks for CLI validation, scenario parsing, and spawn stability.
 - `test_simulation_engine.cpp`: deterministic engine API and stepping behavior coverage.
 - Scenario-file ingestion coverage lives in `test_regressions.cpp` and `test_simulation_engine.cpp`.
 - Predefined stability fixtures live in `fixtures/scenarios/` and are consumed by `test_simulation_engine.cpp`.

@@ -1,17 +1,14 @@
 #ifndef SIMULATION_ENGINE_HPP
 #define SIMULATION_ENGINE_HPP
 
-#include <atomic>
 #include <cstddef>
 #include <mutex>
 #include <random>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "fmm_tree.hpp"
-#include "force_swap.hpp"
 #include "sim_options.hpp"
 
 namespace sim {
@@ -63,23 +60,10 @@ public:
     const EngineFrameStats& frameStats() const noexcept;
 
 private:
-    struct AsyncTreeBuilder {
-        std::thread worker_thread;
-        std::atomic<bool> building{false};
-        std::mutex forces_mutex;
-        std::mutex sources_mutex;
-        std::vector<Complex> pending_forces;
-
-        void startBuild(fmm::FmmTree& tree, std::mutex& tree_mutex);
-        bool trySwapForces(std::vector<Complex>& current_forces);
-        std::unique_lock<std::mutex> lockSourcesScoped();
-
-        ~AsyncTreeBuilder();
-    };
-
     void initializeSources();
     void pinBlackHoleLocked();
     void rebuildTreeSynchronously();
+    std::unique_lock<std::mutex> lockSourcesScoped();
 
     static void addParticles(std::vector<fmm::Source>& sources,
                              double x,
@@ -106,7 +90,7 @@ private:
     fmm::FmmTree tree_;
     std::vector<Complex> current_forces_;
 
-    AsyncTreeBuilder async_builder_;
+    std::mutex sources_mutex_;
     std::mutex tree_mutex_;
 
     int total_frames_ = 0;

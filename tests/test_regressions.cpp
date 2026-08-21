@@ -6,7 +6,6 @@
 #include <random>
 #include <vector>
 
-#include "force_swap.hpp"
 #include "sim_options.hpp"
 #include "simulation_engine.hpp"
 #include "spawn_utils.hpp"
@@ -161,29 +160,6 @@ TEST_CASE("scenario loader rejects incompatible shape", "[regression][scenario]"
         result.error_message.find("must be an array of 2 numbers") != std::string::npos;
     const bool has_expected_error = mentions_missing_required_fields || mentions_bad_vector_shape;
     REQUIRE(has_expected_error);
-}
-
-TEST_CASE("force swap ignores and clears stale pending data", "[regression][async]") {
-    std::vector<Complex> current_forces(5, Complex{1.0, 1.0});
-    std::vector<Complex> pending_forces(3, Complex{9.0, 9.0});
-
-    const bool swapped = sim::trySwapPendingForces(current_forces, pending_forces);
-
-    REQUIRE_FALSE(swapped);
-    REQUIRE(pending_forces.empty());
-    REQUIRE(current_forces.size() == 5);
-}
-
-TEST_CASE("force swap succeeds when vector sizes match", "[regression][async]") {
-    std::vector<Complex> current_forces(2, Complex{1.0, 1.0});
-    std::vector<Complex> pending_forces{Complex{4.0, 5.0}, Complex{6.0, 7.0}};
-
-    const bool swapped = sim::trySwapPendingForces(current_forces, pending_forces);
-
-    REQUIRE(swapped);
-    REQUIRE(pending_forces.empty());
-    REQUIRE(current_forces[0] == Complex{4.0, 5.0});
-    REQUIRE(current_forces[1] == Complex{6.0, 7.0});
 }
 
 TEST_CASE("border-adjacent spawn points stay within simulation bounds", "[regression][spawn]") {
