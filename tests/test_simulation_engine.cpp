@@ -5,6 +5,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "simulation_engine.hpp"
@@ -30,6 +32,27 @@ const fmm::Source* findBlackHole(const std::vector<fmm::Source>& sources, double
     return (it == sources.end()) ? nullptr : &(*it);
 }
 
+const fmm::Source* findBodyNearestMass(const std::vector<fmm::Source>& sources,
+                                       double target_mass,
+                                       const fmm::Source* exclude = nullptr) {
+    const fmm::Source* best = nullptr;
+    double best_error = std::numeric_limits<double>::infinity();
+
+    for (const auto& source : sources) {
+        if (exclude != nullptr && &source == exclude) {
+            continue;
+        }
+
+        const double error = std::abs(source.q - target_mass);
+        if (error < best_error) {
+            best_error = error;
+            best = &source;
+        }
+    }
+
+    return best;
+}
+
 Complex pairwiseForce(const fmm::Source& target, const fmm::Source& source) {
     const double dx = target.position.real() - source.position.real();
     const double dy = target.position.imag() - source.position.imag();
@@ -47,6 +70,189 @@ double twoBodyPseudoEnergy(const std::vector<fmm::Source>& sources) {
     const double separation = std::abs(a.position - b.position);
     const double potential = a.q * b.q * std::log(separation);
     return kinetic + potential;
+}
+
+struct StabilitySnapshot {
+    double pseudo_energy = 0.0;
+    double max_radius_from_initial_center = 0.0;
+    bool all_positions_finite = true;
+    bool all_velocities_finite = true;
+};
+
+struct TwoBodyRunMetrics {
+    bool all_finite = true;
+    double max_relative_energy_drift = 0.0;
+    double final_relative_energy_drift = 0.0;
+    double final_separation = 0.0;
+};
+
+struct HierarchicalRunMetrics {
+    bool all_finite = true;
+    double max_relative_energy_drift = 0.0;
+    double max_radius_from_initial_center = 0.0;
+    double min_planet_star_distance = std::numeric_limits<double>::infinity();
+    double max_planet_star_distance = 0.0;
+    double min_moon_planet_distance = std::numeric_limits<double>::infinity();
+    double max_moon_planet_distance = 0.0;
+};
+
+double manyBodyPseudoEnergy(const std::vector<fmm::Source>& sources) {
+    double kinetic = 0.0;
+    for (const auto& source : sources) {
+        kinetic += 0.5 * std::norm(source.velocity);
+    }
+
+    double potential = 0.0;
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        for (std::size_t j = i + 1; j < sources.size(); ++j) {
+            const double separation = std::abs(sources[i].position - sources[j].position);
+            if (separation <= 1e-9) {
+                return std::numeric_limits<double>::infinity();
+            }
+            potential += sources[i].q * sources[j].q * std::log(separation);
+        }
+    }
+
+    return kinetic + potential;
+}
+
+Complex centerOfGeometry(const std::vector<fmm::Source>& sources) {
+    Complex center{0.0, 0.0};
+    if (sources.empty()) {
+        return center;
+    }
+
+    for (const auto& source : sources) {
+        center += source.position;
+    }
+    center /= static_cast<double>(sources.size());
+    return center;
+}
+
+double maxRadiusFromCenter(const std::vector<fmm::Source>& sources, Complex center) {
+    double max_radius = 0.0;
+    for (const auto& source : sources) {
+        max_radius = std::max(max_radius, std::abs(source.position - center));
+    }
+    return max_radius;
+}
+
+double pairDistance(const std::vector<fmm::Source>& sources, std::size_t a, std::size_t b) {
+    if (a >= sources.size() || b >= sources.size()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return std::abs(sources[a].position - sources[b].position);
+}
+
+StabilitySnapshot captureStabilitySnapshot(const std::vector<fmm::Source>& sources, Complex initial_center) {
+    StabilitySnapshot snapshot;
+    snapshot.pseudo_energy = manyBodyPseudoEnergy(sources);
+    snapshot.max_radius_from_initial_center = maxRadiusFromCenter(sources, initial_center);
+
+    for (const auto& source : sources) {
+        const bool pos_finite = std::isfinite(source.position.real()) && std::isfinite(source.position.imag());
+        const bool vel_finite = std::isfinite(source.velocity.real()) && std::isfinite(source.velocity.imag());
+        snapshot.all_positions_finite = snapshot.all_positions_finite && pos_finite;
+        snapshot.all_velocities_finite = snapshot.all_velocities_finite && vel_finite;
+    }
+
+    return snapshot;
+}
+
+std::filesystem::path scenarioFixturePath(const std::string& filename) {
+    return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "scenarios" / filename;
+}
+
+sim::SimulationEngine makeScenarioEngine(const std::string& fixture_filename) {
+    sim::SimulationOptions options;
+    options.rebuild_every = 1;
+    options.cluster_bodies = 0;
+    options.uniform_bodies = 0;
+    options.orbit_bodies = 0;
+    options.black_hole_mass = 0.0;
+    options.scenario_file = scenarioFixturePath(fixture_filename).string();
+    return sim::SimulationEngine(options, 1380);
+}
+
+TwoBodyRunMetrics runTwoBodyFixtureMetrics(double dt, int steps) {
+    sim::SimulationEngine engine = makeScenarioEngine("two_body_circular.json");
+
+    double initial_energy = 0.0;
+    {
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources.size() == 2);
+        initial_energy = manyBodyPseudoEnergy(sources);
+    }
+
+    TwoBodyRunMetrics metrics;
+    for (int i = 0; i < steps; ++i) {
+        engine.step(dt);
+
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources.size() == 2);
+
+        const StabilitySnapshot snapshot = captureStabilitySnapshot(sources, Complex{690.0, 690.0});
+        metrics.all_finite = metrics.all_finite && snapshot.all_positions_finite && snapshot.all_velocities_finite;
+
+        const double relative_energy_drift =
+            std::abs(snapshot.pseudo_energy - initial_energy) / std::max(1.0, std::abs(initial_energy));
+        metrics.max_relative_energy_drift = std::max(metrics.max_relative_energy_drift, relative_energy_drift);
+        metrics.final_relative_energy_drift = relative_energy_drift;
+        metrics.final_separation = pairDistance(sources, 0, 1);
+    }
+
+    return metrics;
+}
+
+HierarchicalRunMetrics runHierarchicalFixtureMetrics(double dt, int steps) {
+    sim::SimulationEngine engine = makeScenarioEngine("hierarchical_star_planet_moon.json");
+
+    double initial_energy = 0.0;
+    Complex initial_center{0.0, 0.0};
+    {
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources.size() == 3);
+        initial_energy = manyBodyPseudoEnergy(sources);
+        initial_center = centerOfGeometry(sources);
+    }
+
+    HierarchicalRunMetrics metrics;
+    for (int i = 0; i < steps; ++i) {
+        engine.step(dt);
+
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources.size() == 3);
+
+        const StabilitySnapshot snapshot = captureStabilitySnapshot(sources, initial_center);
+        metrics.all_finite = metrics.all_finite && snapshot.all_positions_finite && snapshot.all_velocities_finite;
+        metrics.max_radius_from_initial_center =
+            std::max(metrics.max_radius_from_initial_center, snapshot.max_radius_from_initial_center);
+
+        const double relative_energy_drift =
+            std::abs(snapshot.pseudo_energy - initial_energy) / std::max(1.0, std::abs(initial_energy));
+        metrics.max_relative_energy_drift = std::max(metrics.max_relative_energy_drift, relative_energy_drift);
+
+        const fmm::Source* star = findBodyNearestMass(sources, 80.0);
+        REQUIRE(star != nullptr);
+        const fmm::Source* planet = findBodyNearestMass(sources, 1.0, star);
+        REQUIRE(planet != nullptr);
+        const fmm::Source* moon = findBodyNearestMass(sources, 0.05, planet);
+        REQUIRE(moon != nullptr);
+
+        const double planet_star_distance = std::abs(planet->position - star->position);
+        const double moon_planet_distance = std::abs(moon->position - planet->position);
+
+        metrics.min_planet_star_distance = std::min(metrics.min_planet_star_distance, planet_star_distance);
+        metrics.max_planet_star_distance = std::max(metrics.max_planet_star_distance, planet_star_distance);
+        metrics.min_moon_planet_distance = std::min(metrics.min_moon_planet_distance, moon_planet_distance);
+        metrics.max_moon_planet_distance = std::max(metrics.max_moon_planet_distance, moon_planet_distance);
+    }
+
+    return metrics;
 }
 
 }  // namespace
@@ -327,4 +533,127 @@ TEST_CASE("scenario mode does not pin pseudo black-hole mass", "[engine][scenari
         const auto& body = engine.sources().front();
         REQUIRE(body.position.real() > 200.0);
         REQUIRE(body.position.imag() == Approx(300.0));
+}
+
+TEST_CASE("predefined two-body fixture remains bounded over long horizon", "[engine][scenario][stability]") {
+    sim::SimulationEngine engine = makeScenarioEngine("two_body_circular.json");
+
+    double initial_energy = 0.0;
+    Complex initial_center{0.0, 0.0};
+    double initial_separation = 0.0;
+    {
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources.size() == 2);
+        initial_energy = manyBodyPseudoEnergy(sources);
+        initial_center = centerOfGeometry(sources);
+        initial_separation = pairDistance(sources, 0, 1);
+    }
+
+    constexpr double dt = 1e-3;
+    constexpr int steps = 10000;
+    for (int i = 0; i < steps; ++i) {
+        engine.step(dt);
+    }
+
+    auto lock = engine.lockSources();
+    const auto& sources = engine.sources();
+    REQUIRE(sources.size() == 2);
+
+    const StabilitySnapshot final_snapshot = captureStabilitySnapshot(sources, initial_center);
+    const double relative_energy_drift =
+        std::abs(final_snapshot.pseudo_energy - initial_energy) / std::max(1.0, std::abs(initial_energy));
+    const double final_separation = pairDistance(sources, 0, 1);
+
+    REQUIRE(final_snapshot.all_positions_finite);
+    REQUIRE(final_snapshot.all_velocities_finite);
+    REQUIRE(relative_energy_drift < 0.08);
+    REQUIRE(final_snapshot.max_radius_from_initial_center < 220.0);
+    REQUIRE(final_separation > 120.0);
+    REQUIRE(final_separation < 280.0);
+    REQUIRE(initial_separation > 0.0);
+}
+
+TEST_CASE("predefined hierarchical fixture keeps moon-like companion bounded", "[engine][scenario][stability]") {
+    sim::SimulationEngine engine = makeScenarioEngine("hierarchical_star_planet_moon.json");
+
+    double initial_energy = 0.0;
+    Complex initial_center{0.0, 0.0};
+    double initial_moon_distance = 0.0;
+    {
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources.size() == 3);
+        initial_energy = manyBodyPseudoEnergy(sources);
+        initial_center = centerOfGeometry(sources);
+
+        const fmm::Source* planet = findBodyNearestMass(sources, 1.0);
+        REQUIRE(planet != nullptr);
+        const fmm::Source* moon = findBodyNearestMass(sources, 0.05, planet);
+        REQUIRE(moon != nullptr);
+        initial_moon_distance = std::abs(planet->position - moon->position);
+    }
+
+    constexpr double dt = 1e-3;
+    constexpr int steps = 10000;
+    for (int i = 0; i < steps; ++i) {
+        engine.step(dt);
+    }
+
+    auto lock = engine.lockSources();
+    const auto& sources = engine.sources();
+    REQUIRE(sources.size() == 3);
+
+    const StabilitySnapshot final_snapshot = captureStabilitySnapshot(sources, initial_center);
+    const double relative_energy_drift =
+        std::abs(final_snapshot.pseudo_energy - initial_energy) / std::max(1.0, std::abs(initial_energy));
+
+    const fmm::Source* final_planet = findBodyNearestMass(sources, 1.0);
+    REQUIRE(final_planet != nullptr);
+    const fmm::Source* final_moon = findBodyNearestMass(sources, 0.05, final_planet);
+    REQUIRE(final_moon != nullptr);
+    const double final_moon_distance = std::abs(final_planet->position - final_moon->position);
+
+    REQUIRE(final_snapshot.all_positions_finite);
+    REQUIRE(final_snapshot.all_velocities_finite);
+    REQUIRE(relative_energy_drift < 0.12);
+    REQUIRE(final_snapshot.max_radius_from_initial_center < 420.0);
+    REQUIRE(final_moon_distance > 1.0);
+    REQUIRE(final_moon_distance < 75.0);
+    REQUIRE(initial_moon_distance > 0.0);
+}
+
+TEST_CASE("two-body fixture improves with timestep refinement", "[engine][scenario][precision]") {
+    constexpr double total_time = 2.0;
+    const TwoBodyRunMetrics coarse = runTwoBodyFixtureMetrics(2e-3, static_cast<int>(total_time / 2e-3));
+    const TwoBodyRunMetrics medium = runTwoBodyFixtureMetrics(1e-3, static_cast<int>(total_time / 1e-3));
+    const TwoBodyRunMetrics fine = runTwoBodyFixtureMetrics(5e-4, static_cast<int>(total_time / 5e-4));
+
+    REQUIRE(coarse.all_finite);
+    REQUIRE(medium.all_finite);
+    REQUIRE(fine.all_finite);
+
+    const double coarse_to_fine_sep_error = std::abs(coarse.final_separation - fine.final_separation);
+    const double medium_to_fine_sep_error = std::abs(medium.final_separation - fine.final_separation);
+
+    // Avoid brittle strict ordering between tiny cross-run errors; enforce absolute precision envelopes instead.
+    REQUIRE(coarse_to_fine_sep_error < 5e-5);
+    REQUIRE(medium_to_fine_sep_error < 5e-5);
+    REQUIRE(coarse.max_relative_energy_drift < 5e-5);
+    REQUIRE(medium.max_relative_energy_drift < 5e-5);
+    REQUIRE(fine.max_relative_energy_drift < 5e-5);
+}
+
+TEST_CASE("hierarchical fixture stays bounded throughout trajectory", "[engine][scenario][stability][precision]") {
+    const HierarchicalRunMetrics metrics = runHierarchicalFixtureMetrics(1e-3, 10000);
+
+    REQUIRE(metrics.all_finite);
+    REQUIRE(metrics.max_relative_energy_drift < 0.2);
+    REQUIRE(metrics.max_radius_from_initial_center < 430.0);
+
+    REQUIRE(metrics.min_planet_star_distance > 120.0);
+    REQUIRE(metrics.max_planet_star_distance < 240.0);
+
+    REQUIRE(metrics.min_moon_planet_distance > 1.0);
+    REQUIRE(metrics.max_moon_planet_distance < 80.0);
 }

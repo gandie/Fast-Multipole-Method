@@ -1,0 +1,17 @@
+{
+  "metadata": {
+    "name": "two-body-circular"
+  },
+  "bodies": [
+    {
+      "mass": 1.0,
+      "position": [590.0, 690.0],
+      "velocity": [0.0, -0.7071067811865476]
+    },
+    {
+      "mass": 1.0,
+      "position": [790.0, 690.0],
+      "velocity": [0.0, 0.7071067811865476]
+    }
+  ]
+}

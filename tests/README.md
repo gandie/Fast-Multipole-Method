@@ -12,6 +12,7 @@ This directory contains the local automated test suite for core numerical logic.
 - `test_regressions.cpp`: regression checks for CLI validation and stale force-swap safety.
 - `test_simulation_engine.cpp`: deterministic engine API and stepping behavior coverage.
 - Scenario-file ingestion coverage lives in `test_regressions.cpp` and `test_simulation_engine.cpp`.
+- Predefined stability fixtures live in `fixtures/scenarios/` and are consumed by `test_simulation_engine.cpp`.
 
 ## How Tests Are Built
 
@@ -80,6 +81,20 @@ If `gcovr` is missing, install it in your active environment first.
 4. Prefer direct analytic checks or trusted reference computations.
 5. Keep each test case focused on one behavior and tag tests by domain, for example `[expansion]`, `[quadtree]`, `[math]`.
 6. For regression tests, include the original failure mode in the test name or comments so intent stays explicit.
+
+## Scenario Stability Fixtures
+
+- Store deterministic stability fixtures in `tests/fixtures/scenarios/*.json`.
+- Keep fixture body ordering stable when tests depend on specific pair metrics (for example planet/moon distance checks).
+- Use `metadata.name` for human-readable fixture identity; runtime behavior is driven by the `bodies` list.
+- Stability tests in `test_simulation_engine.cpp` use three fixed envelopes:
+	- Relative pseudo-energy drift envelope.
+	- Radius envelope from the initial geometric center.
+	- Non-escape checks (finite states and bounded pair distance constraints).
+- Additional confidence tests include:
+  - timestep-refinement consistency checks (`dt`, `dt/2`, `dt/4`) against separation and drift metrics
+  - full-trajectory (not only final-state) boundedness envelopes for hierarchical fixtures
+- For new fixtures, add thresholds in the local test helper next to the fixture-specific test case and justify constants in comments if they are not self-evident.
 
 ## Conventions
 
