@@ -26,6 +26,7 @@ Deliver reliable implementation work with minimal noise, tight scope control, an
 - If required tools are missing, or tool choice is unclear, stop and ask for clarification.
 
 ## Skill Routing Rules
+- **ALWAYS** use scientific-critical-thinking skill. This is precise and scientific work, which requires careful evaluation of assumptions, evidence, and reasoning.
 - Use skill bookkeeping on every task-handling pass; this is mandatory.
 - Use skill cpp-pro when implementing or refactoring C++ code.
 
