@@ -7,6 +7,7 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "simulation_engine.hpp"
@@ -96,6 +97,41 @@ struct HierarchicalRunMetrics {
     double max_moon_planet_distance = 0.0;
 };
 
+struct ScenarioRunMetrics {
+    bool all_finite = true;
+    double max_relative_energy_drift = 0.0;
+    double final_relative_energy_drift = 0.0;
+    double max_radius_from_initial_center = 0.0;
+    double min_pair_distance = std::numeric_limits<double>::infinity();
+    double max_pair_distance = 0.0;
+    double final_pair_distance = 0.0;
+};
+
+struct ConvergenceSweepSummary {
+    bool all_finite = true;
+    double coarse_error = 0.0;
+    double medium_error = 0.0;
+    double fine_error = 0.0;
+    double order_coarse_to_medium = 0.0;
+    double order_medium_to_fine = 0.0;
+};
+
+struct ConvergenceFixtureSpec {
+    std::string fixture_filename;
+    double primary_mass = 0.0;
+    double secondary_mass = 0.0;
+    double total_time = 0.0;
+    double coarse_dt = 0.0;
+};
+
+struct BodyState {
+    double q = 0.0;
+    double px = 0.0;
+    double py = 0.0;
+    double vx = 0.0;
+    double vy = 0.0;
+};
+
 double manyBodyPseudoEnergy(const std::vector<fmm::Source>& sources) {
     double kinetic = 0.0;
     for (const auto& source : sources) {
@@ -114,6 +150,15 @@ double manyBodyPseudoEnergy(const std::vector<fmm::Source>& sources) {
     }
 
     return kinetic + potential;
+}
+
+double totalAngularMomentumZ(const std::vector<fmm::Source>& sources) {
+    double lz = 0.0;
+    for (const auto& source : sources) {
+        lz += source.q * (source.position.real() * source.velocity.imag()
+                          - source.position.imag() * source.velocity.real());
+    }
+    return lz;
 }
 
 Complex centerOfGeometry(const std::vector<fmm::Source>& sources) {
@@ -255,6 +300,135 @@ HierarchicalRunMetrics runHierarchicalFixtureMetrics(double dt, int steps) {
     return metrics;
 }
 
+ScenarioRunMetrics runScenarioFixtureMetrics(const std::string& fixture_filename,
+                                             double dt,
+                                             int steps,
+                                             double primary_mass,
+                                             double secondary_mass) {
+    sim::SimulationEngine engine = makeScenarioEngine(fixture_filename);
+
+    double initial_energy = 0.0;
+    Complex initial_center{0.0, 0.0};
+    {
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+        REQUIRE(sources.size() >= 2);
+        initial_energy = manyBodyPseudoEnergy(sources);
+        initial_center = centerOfGeometry(sources);
+    }
+
+    ScenarioRunMetrics metrics;
+    for (int i = 0; i < steps; ++i) {
+        engine.step(dt);
+
+        auto lock = engine.lockSources();
+        const auto& sources = engine.sources();
+
+        const StabilitySnapshot snapshot = captureStabilitySnapshot(sources, initial_center);
+        metrics.all_finite = metrics.all_finite && snapshot.all_positions_finite && snapshot.all_velocities_finite;
+        metrics.max_radius_from_initial_center =
+            std::max(metrics.max_radius_from_initial_center, snapshot.max_radius_from_initial_center);
+
+        const double relative_energy_drift =
+            std::abs(snapshot.pseudo_energy - initial_energy) / std::max(1.0, std::abs(initial_energy));
+        metrics.max_relative_energy_drift = std::max(metrics.max_relative_energy_drift, relative_energy_drift);
+        metrics.final_relative_energy_drift = relative_energy_drift;
+
+        const fmm::Source* primary = findBodyNearestMass(sources, primary_mass);
+        REQUIRE(primary != nullptr);
+        const fmm::Source* secondary = findBodyNearestMass(sources, secondary_mass, primary);
+        REQUIRE(secondary != nullptr);
+
+        const double pair_distance = std::abs(primary->position - secondary->position);
+        metrics.min_pair_distance = std::min(metrics.min_pair_distance, pair_distance);
+        metrics.max_pair_distance = std::max(metrics.max_pair_distance, pair_distance);
+        metrics.final_pair_distance = pair_distance;
+    }
+
+    return metrics;
+}
+
+double observedOrder(double coarser_error, double finer_error) {
+    constexpr double error_floor = 1e-16;
+    const double safe_coarser = std::max(coarser_error, error_floor);
+    const double safe_finer = std::max(finer_error, error_floor);
+    return std::log(safe_coarser / safe_finer) / std::log(2.0);
+}
+
+ConvergenceSweepSummary evaluatePairDistanceConvergence(const ConvergenceFixtureSpec& spec) {
+    const double medium_dt = spec.coarse_dt * 0.5;
+    const double fine_dt = spec.coarse_dt * 0.25;
+    const double reference_dt = spec.coarse_dt * 0.125;
+
+    const int coarse_steps = static_cast<int>(spec.total_time / spec.coarse_dt);
+    const int medium_steps = static_cast<int>(spec.total_time / medium_dt);
+    const int fine_steps = static_cast<int>(spec.total_time / fine_dt);
+    const int reference_steps = static_cast<int>(spec.total_time / reference_dt);
+
+    const ScenarioRunMetrics coarse =
+        runScenarioFixtureMetrics(spec.fixture_filename, spec.coarse_dt, coarse_steps, spec.primary_mass, spec.secondary_mass);
+    const ScenarioRunMetrics medium =
+        runScenarioFixtureMetrics(spec.fixture_filename, medium_dt, medium_steps, spec.primary_mass, spec.secondary_mass);
+    const ScenarioRunMetrics fine =
+        runScenarioFixtureMetrics(spec.fixture_filename, fine_dt, fine_steps, spec.primary_mass, spec.secondary_mass);
+    const ScenarioRunMetrics reference = runScenarioFixtureMetrics(
+        spec.fixture_filename, reference_dt, reference_steps, spec.primary_mass, spec.secondary_mass);
+
+    ConvergenceSweepSummary summary;
+    summary.all_finite = coarse.all_finite && medium.all_finite && fine.all_finite && reference.all_finite;
+    summary.coarse_error = std::abs(coarse.final_pair_distance - reference.final_pair_distance);
+    summary.medium_error = std::abs(medium.final_pair_distance - reference.final_pair_distance);
+    summary.fine_error = std::abs(fine.final_pair_distance - reference.final_pair_distance);
+    summary.order_coarse_to_medium = observedOrder(summary.coarse_error, summary.medium_error);
+    summary.order_medium_to_fine = observedOrder(summary.medium_error, summary.fine_error);
+    return summary;
+}
+
+std::vector<BodyState> canonicalBodyStates(const std::vector<fmm::Source>& sources) {
+    std::vector<BodyState> states;
+    states.reserve(sources.size());
+    for (const auto& source : sources) {
+        states.push_back(
+            BodyState{source.q, source.position.real(), source.position.imag(), source.velocity.real(), source.velocity.imag()});
+    }
+
+    std::sort(states.begin(), states.end(), [](const BodyState& a, const BodyState& b) {
+        return std::tie(a.q, a.px, a.py, a.vx, a.vy) < std::tie(b.q, b.px, b.py, b.vx, b.vy);
+    });
+    return states;
+}
+
+std::vector<BodyState> runScenarioAndCaptureState(const std::string& fixture_filename, double dt, int steps) {
+    sim::SimulationEngine engine = makeScenarioEngine(fixture_filename);
+    for (int i = 0; i < steps; ++i) {
+        engine.step(dt);
+    }
+
+    auto lock = engine.lockSources();
+    return canonicalBodyStates(engine.sources());
+}
+
+std::vector<BodyState> runGeneratedAndCaptureState(sim::SimulationOptions options, double dt, int steps) {
+    sim::SimulationEngine engine(options, 1380);
+    for (int i = 0; i < steps; ++i) {
+        engine.step(dt);
+    }
+
+    auto lock = engine.lockSources();
+    return canonicalBodyStates(engine.sources());
+}
+
+void requireSameState(const std::vector<BodyState>& lhs, const std::vector<BodyState>& rhs, double margin) {
+    REQUIRE(lhs.size() == rhs.size());
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        REQUIRE(lhs[i].q == Approx(rhs[i].q).margin(margin));
+        REQUIRE(lhs[i].px == Approx(rhs[i].px).margin(margin));
+        REQUIRE(lhs[i].py == Approx(rhs[i].py).margin(margin));
+        REQUIRE(lhs[i].vx == Approx(rhs[i].vx).margin(margin));
+        REQUIRE(lhs[i].vy == Approx(rhs[i].vy).margin(margin));
+    }
+}
+
 }  // namespace
 
 TEST_CASE("engine initializes sources and tree geometry", "[engine][regression]") {
@@ -311,10 +485,80 @@ TEST_CASE("step updates frame stats and rebuild cadence path", "[engine][regress
     REQUIRE(first.integrate_ms >= 0.0f);
     REQUIRE(first.phase3_ms >= 0.0f);
     REQUIRE(first.ema_build_ms >= 0.0f);
+    REQUIRE(first.rebuilt_forces_this_frame);
+    REQUIRE(first.frames_since_force_rebuild == 0);
 
     engine.step(0.001);
     const sim::EngineFrameStats second = engine.frameStats();
     REQUIRE(second.max_build_ms >= first.max_build_ms);
+    REQUIRE_FALSE(second.rebuilt_forces_this_frame);
+    REQUIRE(second.frames_since_force_rebuild == 1);
+}
+
+TEST_CASE("rebuild cadence telemetry matches strict configured schedule", "[engine][regression][cadence]") {
+    sim::SimulationOptions options;
+    options.rebuild_every = 3;
+    options.cluster_bodies = 0;
+    options.uniform_bodies = 2;
+    options.orbit_bodies = 0;
+    options.black_hole_mass = 0.0;
+
+    sim::SimulationEngine engine(options, 1380);
+
+    engine.step(0.001);
+    auto s0 = engine.frameStats();
+    REQUIRE(s0.rebuilt_forces_this_frame);
+    REQUIRE(s0.frames_since_force_rebuild == 0);
+
+    engine.step(0.001);
+    auto s1 = engine.frameStats();
+    REQUIRE_FALSE(s1.rebuilt_forces_this_frame);
+    REQUIRE(s1.frames_since_force_rebuild == 1);
+
+    engine.step(0.001);
+    auto s2 = engine.frameStats();
+    REQUIRE_FALSE(s2.rebuilt_forces_this_frame);
+    REQUIRE(s2.frames_since_force_rebuild == 2);
+
+    engine.step(0.001);
+    auto s3 = engine.frameStats();
+    REQUIRE(s3.rebuilt_forces_this_frame);
+    REQUIRE(s3.frames_since_force_rebuild == 0);
+
+    for (int frame = 4; frame < 11; ++frame) {
+        engine.step(0.001);
+        const auto stats = engine.frameStats();
+        const bool expected_rebuild = (frame % 3) == 0;
+        REQUIRE(stats.rebuilt_forces_this_frame == expected_rebuild);
+        REQUIRE(stats.frames_since_force_rebuild == (expected_rebuild ? 0 : frame % 3));
+    }
+}
+
+TEST_CASE("scenario replay is deterministic with synchronous cadence", "[engine][scenario][regression][determinism]") {
+    constexpr double dt = 1e-3;
+    constexpr int steps = 4000;
+
+    const auto first = runScenarioAndCaptureState("high_mass_ratio_binary.json", dt, steps);
+    const auto second = runScenarioAndCaptureState("high_mass_ratio_binary.json", dt, steps);
+
+    requireSameState(first, second, 1e-11);
+}
+
+TEST_CASE("generated replay is deterministic for fixed seed and cadence", "[engine][regression][determinism]") {
+    sim::SimulationOptions options;
+    options.rebuild_every = 3;
+    options.cluster_bodies = 3;
+    options.uniform_bodies = 3;
+    options.orbit_bodies = 0;
+    options.black_hole_mass = 0.0;
+
+    constexpr double dt = 1e-3;
+    constexpr int steps = 200;
+
+    const auto first = runGeneratedAndCaptureState(options, dt, steps);
+    const auto second = runGeneratedAndCaptureState(options, dt, steps);
+
+    requireSameState(first, second, 1e-11);
 }
 
 TEST_CASE("black hole is pinned to center each step", "[engine][regression]") {
@@ -539,6 +783,7 @@ TEST_CASE("predefined two-body fixture remains bounded over long horizon", "[eng
     sim::SimulationEngine engine = makeScenarioEngine("two_body_circular.json");
 
     double initial_energy = 0.0;
+    double initial_lz = 0.0;
     Complex initial_center{0.0, 0.0};
     double initial_separation = 0.0;
     {
@@ -546,6 +791,7 @@ TEST_CASE("predefined two-body fixture remains bounded over long horizon", "[eng
         const auto& sources = engine.sources();
         REQUIRE(sources.size() == 2);
         initial_energy = manyBodyPseudoEnergy(sources);
+        initial_lz = totalAngularMomentumZ(sources);
         initial_center = centerOfGeometry(sources);
         initial_separation = pairDistance(sources, 0, 1);
     }
@@ -563,14 +809,17 @@ TEST_CASE("predefined two-body fixture remains bounded over long horizon", "[eng
     const StabilitySnapshot final_snapshot = captureStabilitySnapshot(sources, initial_center);
     const double relative_energy_drift =
         std::abs(final_snapshot.pseudo_energy - initial_energy) / std::max(1.0, std::abs(initial_energy));
+    const double final_lz = totalAngularMomentumZ(sources);
+    const double relative_lz_drift = std::abs(final_lz - initial_lz) / std::max(1.0, std::abs(initial_lz));
     const double final_separation = pairDistance(sources, 0, 1);
 
     REQUIRE(final_snapshot.all_positions_finite);
     REQUIRE(final_snapshot.all_velocities_finite);
-    REQUIRE(relative_energy_drift < 0.08);
-    REQUIRE(final_snapshot.max_radius_from_initial_center < 220.0);
-    REQUIRE(final_separation > 120.0);
-    REQUIRE(final_separation < 280.0);
+    REQUIRE(relative_energy_drift < 0.07);
+    REQUIRE(relative_lz_drift < 0.02);
+    REQUIRE(final_snapshot.max_radius_from_initial_center < 215.0);
+    REQUIRE(final_separation > 125.0);
+    REQUIRE(final_separation < 275.0);
     REQUIRE(initial_separation > 0.0);
 }
 
@@ -616,10 +865,10 @@ TEST_CASE("predefined hierarchical fixture keeps moon-like companion bounded", "
 
     REQUIRE(final_snapshot.all_positions_finite);
     REQUIRE(final_snapshot.all_velocities_finite);
-    REQUIRE(relative_energy_drift < 0.12);
-    REQUIRE(final_snapshot.max_radius_from_initial_center < 420.0);
+    REQUIRE(relative_energy_drift < 0.11);
+    REQUIRE(final_snapshot.max_radius_from_initial_center < 410.0);
     REQUIRE(final_moon_distance > 1.0);
-    REQUIRE(final_moon_distance < 75.0);
+    REQUIRE(final_moon_distance < 72.0);
     REQUIRE(initial_moon_distance > 0.0);
 }
 
@@ -637,11 +886,11 @@ TEST_CASE("two-body fixture improves with timestep refinement", "[engine][scenar
     const double medium_to_fine_sep_error = std::abs(medium.final_separation - fine.final_separation);
 
     // Avoid brittle strict ordering between tiny cross-run errors; enforce absolute precision envelopes instead.
-    REQUIRE(coarse_to_fine_sep_error < 5e-5);
-    REQUIRE(medium_to_fine_sep_error < 5e-5);
-    REQUIRE(coarse.max_relative_energy_drift < 5e-5);
-    REQUIRE(medium.max_relative_energy_drift < 5e-5);
-    REQUIRE(fine.max_relative_energy_drift < 5e-5);
+    REQUIRE(coarse_to_fine_sep_error < 4e-5);
+    REQUIRE(medium_to_fine_sep_error < 4e-5);
+    REQUIRE(coarse.max_relative_energy_drift < 4e-5);
+    REQUIRE(medium.max_relative_energy_drift < 4e-5);
+    REQUIRE(fine.max_relative_energy_drift < 4e-5);
 }
 
 TEST_CASE("hierarchical fixture stays bounded throughout trajectory", "[engine][scenario][stability][precision]") {
@@ -656,4 +905,66 @@ TEST_CASE("hierarchical fixture stays bounded throughout trajectory", "[engine][
 
     REQUIRE(metrics.min_moon_planet_distance > 1.0);
     REQUIRE(metrics.max_moon_planet_distance < 80.0);
+}
+
+TEST_CASE("scenario fixtures show consistent timestep-refinement convergence", "[engine][scenario][precision][convergence]") {
+    const std::vector<ConvergenceFixtureSpec> fixtures = {
+        {"two_body_circular.json", 1.0, 1.0, 2.0, 2e-3},
+        {"hierarchical_star_planet_moon.json", 80.0, 1.0, 2.0, 2e-3},
+        {"high_mass_ratio_binary.json", 80.0, 0.2, 2.0, 2e-3},
+    };
+
+    for (const auto& fixture : fixtures) {
+        const ConvergenceSweepSummary summary = evaluatePairDistanceConvergence(fixture);
+
+        INFO("fixture=" << fixture.fixture_filename);
+        INFO("coarse_error=" << summary.coarse_error);
+        INFO("medium_error=" << summary.medium_error);
+        INFO("fine_error=" << summary.fine_error);
+        INFO("order_coarse_to_medium=" << summary.order_coarse_to_medium);
+        INFO("order_medium_to_fine=" << summary.order_medium_to_fine);
+
+        REQUIRE(summary.all_finite);
+        if (summary.coarse_error > 5e-7 || summary.medium_error > 5e-7) {
+            REQUIRE(summary.coarse_error > summary.medium_error);
+            REQUIRE(summary.order_coarse_to_medium >= 0.9);
+        } else {
+            REQUIRE(summary.coarse_error < 5e-7);
+            REQUIRE(summary.medium_error < 5e-7);
+        }
+
+        // When both medium/fine errors are at the sub-micro reference floor, cancellation can invert
+        // tiny differences without indicating loss of the broader timestep-refinement trend.
+        if (summary.medium_error > 5e-7 || summary.fine_error > 5e-7) {
+            REQUIRE(summary.medium_error > summary.fine_error);
+            REQUIRE(summary.order_medium_to_fine >= 0.9);
+        } else {
+            REQUIRE(summary.medium_error < 5e-7);
+            REQUIRE(summary.fine_error < 5e-7);
+        }
+
+        REQUIRE(summary.fine_error < 1.5e-4);
+    }
+}
+
+TEST_CASE("high mass-ratio fixture stays finite and bounded over long horizon", "[engine][scenario][stability][stress]") {
+    const ScenarioRunMetrics metrics = runScenarioFixtureMetrics("high_mass_ratio_binary.json", 1e-3, 20000, 80.0, 0.2);
+
+    REQUIRE(metrics.all_finite);
+    // This stiff regime exhibits larger pseudo-energy oscillation under the current integrator.
+    REQUIRE(metrics.max_relative_energy_drift < 0.35);
+    REQUIRE(metrics.max_radius_from_initial_center < 275.0);
+    REQUIRE(metrics.min_pair_distance > 130.0);
+    REQUIRE(metrics.max_pair_distance < 295.0);
+}
+
+TEST_CASE("close-approach fixture remains finite under near-singular stress", "[engine][scenario][stability][stress]") {
+    const ScenarioRunMetrics metrics = runScenarioFixtureMetrics("close_approach_binary.json", 5e-4, 30000, 1.0, 1.0);
+
+    REQUIRE(metrics.all_finite);
+    // Near-singular encounters are intentionally difficult; keep a bounded but realistic envelope.
+    REQUIRE(metrics.max_relative_energy_drift < 0.45);
+    REQUIRE(metrics.max_radius_from_initial_center < 19.0);
+    REQUIRE(metrics.min_pair_distance > 2.0);
+    REQUIRE(metrics.max_pair_distance < 11.5);
 }

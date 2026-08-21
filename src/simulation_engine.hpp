@@ -23,6 +23,8 @@ struct EngineFrameStats {
     float frame_ms = 0.0f;
     float ema_build_ms = 0.0f;
     float max_build_ms = 0.0f;
+    bool rebuilt_forces_this_frame = false;
+    int frames_since_force_rebuild = 0;
 };
 
 struct ScenarioLoadResult {

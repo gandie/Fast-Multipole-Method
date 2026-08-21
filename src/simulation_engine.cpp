@@ -368,9 +368,18 @@ void SimulationEngine::step(double dt) {
         std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
 
     phase_start = Clock::now();
-    async_builder_.trySwapForces(current_forces_);
-    if (options_.rebuild_every <= 1 || (total_frames_ % options_.rebuild_every) == 0) {
-        async_builder_.startBuild(tree_, tree_mutex_);
+    const bool should_rebuild_now =
+        (options_.rebuild_every <= 1) || ((total_frames_ % options_.rebuild_every) == 0);
+    stats_.rebuilt_forces_this_frame = should_rebuild_now;
+    if (should_rebuild_now) {
+        // Enforce deterministic force freshness at configured cadence.
+        auto lock = async_builder_.lockSourcesScoped();
+        std::lock_guard<std::mutex> tree_lock(tree_mutex_);
+        tree_.buildTree();
+        current_forces_ = tree_.forces;
+        stats_.frames_since_force_rebuild = 0;
+    } else {
+        ++stats_.frames_since_force_rebuild;
     }
 
     stats_.build_ms = static_cast<float>(
