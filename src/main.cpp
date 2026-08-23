@@ -6,6 +6,10 @@
 #include <iomanip>
 #include <stdexcept>
 #include <vector>
+#include <array>
+#include <random>
+#include <algorithm>
+#include <cstdint>
 #include <omp.h>
 #include "sim_options.hpp"
 #include "simulation_engine.hpp"
@@ -90,23 +94,146 @@ int main(int argc, char* argv[]) {
         sim::SimulationEngine engine(parsed.options, screen_size);
 
         bool drawBoxes = false;
+        bool drawStars = true;
+        bool drawStreaks = true;
+        bool drawGlow = true;
+        int palette_index = 0;
 
         const double radius_step = 5.0;
 
+        auto clamp01 = [](float v) {
+            return std::max(0.0f, std::min(1.0f, v));
+        };
+
+        auto mixColor = [](const sf::Color& a, const sf::Color& b, float t) {
+            const float u = std::max(0.0f, std::min(1.0f, t));
+            const auto lerp = [u](std::uint8_t x, std::uint8_t y) {
+                return static_cast<std::uint8_t>(static_cast<float>(x) + (static_cast<float>(y) - static_cast<float>(x)) * u);
+            };
+            return sf::Color(lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b), lerp(a.a, b.a));
+        };
+
+        std::array<sf::Color, 256> speed_lut{};
+        const std::array<std::array<sf::Color, 4>, 3> palettes{{
+            std::array<sf::Color, 4>{
+                sf::Color(34, 44, 114, 245),
+                sf::Color(54, 196, 255, 250),
+                sf::Color(255, 216, 124, 255),
+                sf::Color(255, 246, 222, 255)},
+            std::array<sf::Color, 4>{
+                sf::Color(44, 76, 146, 245),
+                sf::Color(118, 255, 214, 250),
+                sf::Color(255, 255, 166, 255),
+                sf::Color(255, 255, 240, 255)},
+            std::array<sf::Color, 4>{
+                sf::Color(58, 24, 118, 245),
+                sf::Color(255, 100, 220, 250),
+                sf::Color(255, 190, 106, 255),
+                sf::Color(255, 245, 232, 255)}
+        }};
+
+        auto rebuildSpeedLut = [&]() {
+            const auto& p = palettes[static_cast<std::size_t>(palette_index) % palettes.size()];
+            for (size_t i = 0; i < speed_lut.size(); ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(speed_lut.size() - 1);
+                if (t < 0.38f) {
+                    speed_lut[i] = mixColor(p[0], p[1], t / 0.38f);
+                } else if (t < 0.78f) {
+                    speed_lut[i] = mixColor(p[1], p[2], (t - 0.38f) / 0.40f);
+                } else {
+                    speed_lut[i] = mixColor(p[2], p[3], (t - 0.78f) / 0.22f);
+                }
+            }
+        };
+        rebuildSpeedLut();
+
         // Reused draw buffers
         sf::VertexArray particle_va(sf::PrimitiveType::Points, engine.particleCount());
-        for (size_t i = 0; i < particle_va.getVertexCount(); ++i) {
-            particle_va[i].color = p_color;
+        sf::VertexArray streak_va(sf::PrimitiveType::Lines);
+        sf::VertexArray glow_va(sf::PrimitiveType::Triangles);
+
+        float speed_scale = 180.0f;
+
+        const int glow_grid_dim = 192;
+        const float glow_cell = static_cast<float>(screen_size) / static_cast<float>(glow_grid_dim);
+        const std::size_t glow_cell_count = static_cast<std::size_t>(glow_grid_dim * glow_grid_dim);
+        std::vector<float> glow_counts(glow_cell_count, 0.0f);
+        std::vector<float> glow_smoothed(glow_cell_count, 0.0f);
+        std::vector<float> glow_blurred(glow_cell_count, 0.0f);
+
+        glow_va.resize(glow_cell_count * 6);
+        for (int gy = 0; gy < glow_grid_dim; ++gy) {
+            for (int gx = 0; gx < glow_grid_dim; ++gx) {
+                const std::size_t idx = static_cast<std::size_t>(gy * glow_grid_dim + gx);
+                const std::size_t v = idx * 6;
+                const float x0 = static_cast<float>(gx) * glow_cell;
+                const float y0 = static_cast<float>(gy) * glow_cell;
+                const float x1 = x0 + glow_cell;
+                const float y1 = y0 + glow_cell;
+
+                glow_va[v]     = sf::Vertex{sf::Vector2f(x0, y0), sf::Color(0, 0, 0, 0)};
+                glow_va[v + 1] = sf::Vertex{sf::Vector2f(x1, y0), sf::Color(0, 0, 0, 0)};
+                glow_va[v + 2] = sf::Vertex{sf::Vector2f(x1, y1), sf::Color(0, 0, 0, 0)};
+                glow_va[v + 3] = sf::Vertex{sf::Vector2f(x0, y0), sf::Color(0, 0, 0, 0)};
+                glow_va[v + 4] = sf::Vertex{sf::Vector2f(x1, y1), sf::Color(0, 0, 0, 0)};
+                glow_va[v + 5] = sf::Vertex{sf::Vector2f(x0, y1), sf::Color(0, 0, 0, 0)};
+            }
         }
+
+        const std::size_t star_far_count = 520;
+        const std::size_t star_near_count = 860;
+        std::mt19937 star_rng(1337u);
+        std::uniform_real_distribution<float> star_pos_dist(0.0f, static_cast<float>(screen_size));
+        std::uniform_real_distribution<float> star_alpha_dist(0.0f, 1.0f);
+
+        std::vector<sf::Vector2f> star_far_base(star_far_count);
+        std::vector<sf::Vector2f> star_near_base(star_near_count);
+        sf::VertexArray stars_far(sf::PrimitiveType::Points, star_far_count);
+        sf::VertexArray stars_near(sf::PrimitiveType::Points, star_near_count);
+
+        for (std::size_t i = 0; i < star_far_count; ++i) {
+            star_far_base[i] = sf::Vector2f(star_pos_dist(star_rng), star_pos_dist(star_rng));
+            const std::uint8_t alpha = static_cast<std::uint8_t>(35 + 60 * star_alpha_dist(star_rng));
+            stars_far[i].color = sf::Color(120, 150, 200, alpha);
+            stars_far[i].position = star_far_base[i];
+        }
+        for (std::size_t i = 0; i < star_near_count; ++i) {
+            star_near_base[i] = sf::Vector2f(star_pos_dist(star_rng), star_pos_dist(star_rng));
+            const std::uint8_t alpha = static_cast<std::uint8_t>(55 + 90 * star_alpha_dist(star_rng));
+            stars_near[i].color = sf::Color(170, 210, 255, alpha);
+            stars_near[i].position = star_near_base[i];
+        }
+
+        auto wrapToScreen = [screen_size](float v) {
+            const float s = static_cast<float>(screen_size);
+            while (v < 0.0f) v += s;
+            while (v >= s) v -= s;
+            return v;
+        };
+
+        auto syncParticleBuffers = [&](std::size_t n) {
+            particle_va.resize(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                particle_va[i].color = p_color;
+            }
+        };
+
+        syncParticleBuffers(engine.particleCount());
 
         sf::Text overlay(font, "", 20);
         overlay.setFillColor(sf::Color::White);
         overlay.setPosition({10.f, 8.f});
 
+        sf::Text controls_legend(font, "", 16);
+        controls_legend.setFillColor(sf::Color(210, 224, 255, 220));
+        controls_legend.setPosition({10.f, static_cast<float>(screen_size) - 26.f});
+
         float tRenderMs = 0.f;
         float tFrameMs = 0.f;
         size_t particle_count_snapshot = particle_va.getVertexCount();
         std::size_t telemetry_frame = 0;
+
+        std::cout << "Visual toggles: [G]=glow [V]=streaks [N]=stars [C]=palette [B]=boxes\n";
 
           std::cout << "# build_telemetry frame rebuild spike build_ms build_internal_ms sort_ms node_lists_ms upward_ms downward_ms forces_ms "
                 << "nodes height leaves max_leaf list_w_evals direct_pair_evals near_total interaction_total list_w_total list_x_total "
@@ -119,6 +246,14 @@ int main(int argc, char* argv[]) {
             if (event->is<sf::Event::Closed>()) window.close();
             else if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>()) {
                 if (keyPressed->scancode == sf::Keyboard::Scancode::Escape) window.close();
+                else if (keyPressed->scancode == sf::Keyboard::Scancode::G) drawGlow = !drawGlow;
+                else if (keyPressed->scancode == sf::Keyboard::Scancode::V) drawStreaks = !drawStreaks;
+                else if (keyPressed->scancode == sf::Keyboard::Scancode::N) drawStars = !drawStars;
+                else if (keyPressed->scancode == sf::Keyboard::Scancode::B) drawBoxes = !drawBoxes;
+                else if (keyPressed->scancode == sf::Keyboard::Scancode::C) {
+                    palette_index = (palette_index + 1) % static_cast<int>(palettes.size());
+                    rebuildSpeedLut();
+                }
             }
             else if (const auto* mouseButton = event->getIf<sf::Event::MouseButtonPressed>()) {
                 sf::Vector2f cursor = window.mapPixelToCoords(sf::Mouse::getPosition(window));
@@ -131,10 +266,7 @@ int main(int argc, char* argv[]) {
 
                 const size_t particle_count = engine.particleCount();
                 if (particle_count != particle_va.getVertexCount()) {
-                    particle_va.resize(particle_count);
-                    for (size_t i = 0; i < particle_count; ++i) {
-                        particle_va[i].color = p_color;
-                    }
+                    syncParticleBuffers(particle_count);
                 }
             }
             else if (const auto* scroll = event->getIf<sf::Event::MouseWheelScrolled>()) {
@@ -146,28 +278,169 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        window.clear(sf::Color::Black);
+        window.clear(sf::Color(5, 7, 16));
         engine.step(dt);
 
         renderClock.restart();
+        Complex center_of_geometry{0.0, 0.0};
         {
             auto lock = engine.lockSources();
             const auto& sources = engine.sources();
             particle_count_snapshot = sources.size();
 
             if (particle_va.getVertexCount() != sources.size()) {
-                particle_va.resize(sources.size());
-                for (size_t i = 0; i < sources.size(); ++i) {
-                    particle_va[i].color = p_color;
+                syncParticleBuffers(sources.size());
+            }
+
+            float observed_max_speed = 1e-3f;
+
+            for (size_t i = 0; i < sources.size(); ++i) {
+                const sf::Vector2f p(
+                    static_cast<float>(sources[i].position.real()),
+                    static_cast<float>(sources[i].position.imag()));
+                particle_va[i].position = p;
+
+                const float vx = static_cast<float>(sources[i].velocity.real());
+                const float vy = static_cast<float>(sources[i].velocity.imag());
+                const float speed = std::sqrt(vx * vx + vy * vy);
+                observed_max_speed = std::max(observed_max_speed, speed);
+                const float speed_norm = clamp01(speed / std::max(1.0f, speed_scale));
+                const std::size_t lut_idx = static_cast<std::size_t>(speed_norm * 255.0f);
+                particle_va[i].color = speed_lut[lut_idx];
+
+                center_of_geometry += sources[i].position;
+            }
+
+            if (!sources.empty()) {
+                center_of_geometry /= static_cast<double>(sources.size());
+            }
+
+            speed_scale = 0.92f * speed_scale + 0.08f * std::max(40.0f, observed_max_speed * 1.6f);
+
+            const std::size_t n = sources.size();
+            const std::size_t glow_stride =
+                (n > 200000) ? 8 :
+                (n > 120000) ? 6 :
+                (n > 70000)  ? 4 :
+                (n > 30000)  ? 2 : 1;
+
+            std::fill(glow_counts.begin(), glow_counts.end(), 0.0f);
+            if (drawGlow && n > 0) {
+                for (std::size_t i = 0; i < n; i += glow_stride) {
+                    const float x = particle_va[i].position.x;
+                    const float y = particle_va[i].position.y;
+                    if (x < 0.0f || x >= static_cast<float>(screen_size) || y < 0.0f || y >= static_cast<float>(screen_size)) {
+                        continue;
+                    }
+
+                    const int gx = static_cast<int>(x / glow_cell);
+                    const int gy = static_cast<int>(y / glow_cell);
+                    if (gx < 0 || gx >= glow_grid_dim || gy < 0 || gy >= glow_grid_dim) continue;
+
+                    const std::size_t idx = static_cast<std::size_t>(gy * glow_grid_dim + gx);
+                    glow_counts[idx] += static_cast<float>(glow_stride);
+                }
+
+                for (std::size_t i = 0; i < glow_cell_count; ++i) {
+                    glow_smoothed[i] = 0.84f * glow_smoothed[i] + 0.16f * glow_counts[i];
+                }
+            } else {
+                for (std::size_t i = 0; i < glow_cell_count; ++i) {
+                    glow_smoothed[i] *= 0.86f;
                 }
             }
 
-            for (size_t i = 0; i < sources.size(); ++i) {
-                particle_va[i].position = sf::Vector2f(
-                    static_cast<float>(sources[i].position.real()),
-                    static_cast<float>(sources[i].position.imag())
-                );
+            if (drawGlow) {
+                auto idxAt = [glow_grid_dim](int x, int y) {
+                    return static_cast<std::size_t>(y * glow_grid_dim + x);
+                };
+
+                for (int gy = 0; gy < glow_grid_dim; ++gy) {
+                    for (int gx = 0; gx < glow_grid_dim; ++gx) {
+                        const int x0 = std::max(0, gx - 1);
+                        const int x1 = std::min(glow_grid_dim - 1, gx + 1);
+                        const int y0 = std::max(0, gy - 1);
+                        const int y1 = std::min(glow_grid_dim - 1, gy + 1);
+
+                        const float c = glow_smoothed[idxAt(gx, gy)] * 4.0f;
+                        const float n = glow_smoothed[idxAt(gx, y0)] * 2.0f;
+                        const float s = glow_smoothed[idxAt(gx, y1)] * 2.0f;
+                        const float w = glow_smoothed[idxAt(x0, gy)] * 2.0f;
+                        const float e = glow_smoothed[idxAt(x1, gy)] * 2.0f;
+                        const float nw = glow_smoothed[idxAt(x0, y0)];
+                        const float ne = glow_smoothed[idxAt(x1, y0)];
+                        const float sw = glow_smoothed[idxAt(x0, y1)];
+                        const float se = glow_smoothed[idxAt(x1, y1)];
+
+                        glow_blurred[idxAt(gx, gy)] = (c + n + s + w + e + nw + ne + sw + se) / 16.0f;
+                    }
+                }
+
+                const float base_grid = 72.0f;
+                const float gain = (static_cast<float>(glow_grid_dim) * static_cast<float>(glow_grid_dim)) / (base_grid * base_grid);
+                for (std::size_t idx = 0; idx < glow_cell_count; ++idx) {
+                    const float density = glow_blurred[idx];
+                    const float response = 1.0f - std::exp(-density * 0.028f * gain * 0.85f);
+                    const float warmth = clamp01(response * 1.15f);
+                    const std::uint8_t a = static_cast<std::uint8_t>(120.0f * response);
+                    const sf::Color glow_col = mixColor(
+                        sf::Color(72, 140, 255, a),
+                        sf::Color(255, 220, 150, a),
+                        warmth);
+
+                    const std::size_t v = idx * 6;
+                    glow_va[v].color = glow_col;
+                    glow_va[v + 1].color = glow_col;
+                    glow_va[v + 2].color = glow_col;
+                    glow_va[v + 3].color = glow_col;
+                    glow_va[v + 4].color = glow_col;
+                    glow_va[v + 5].color = glow_col;
+                }
             }
+
+            const std::size_t render_stride =
+                (n > 140000) ? 6 :
+                (n > 80000)  ? 4 :
+                (n > 30000)  ? 2 : 1;
+
+            std::size_t segment_count = 0;
+            if (n > 0) {
+                segment_count = (n + render_stride - 1) / render_stride;
+            }
+            streak_va.resize(segment_count * 2);
+
+            std::size_t seg = 0;
+            for (std::size_t i = 0; i < n; i += render_stride) {
+                const sf::Vector2f p = particle_va[i].position;
+                const float vx = static_cast<float>(sources[i].velocity.real());
+                const float vy = static_cast<float>(sources[i].velocity.imag());
+                const float speed = std::sqrt(vx * vx + vy * vy);
+                const float inv_speed = 1.0f / std::max(speed, 1e-6f);
+
+                const float streak_len = std::min(16.0f, std::max(0.9f, speed * 0.08f));
+                const sf::Vector2f back(vx * inv_speed * streak_len, vy * inv_speed * streak_len);
+
+                const std::size_t a = seg * 2;
+                streak_va[a] = sf::Vertex{p, sf::Color(190, 232, 255, 44)};
+                streak_va[a + 1] = sf::Vertex{sf::Vector2f(p.x - back.x, p.y - back.y), sf::Color(190, 232, 255, 0)};
+                ++seg;
+            }
+        }
+
+        const float dx = static_cast<float>(center_of_geometry.real()) - static_cast<float>(screen_size) * 0.5f;
+        const float dy = static_cast<float>(center_of_geometry.imag()) - static_cast<float>(screen_size) * 0.5f;
+        for (std::size_t i = 0; i < star_far_count; ++i) {
+            stars_far[i].position.x = wrapToScreen(star_far_base[i].x - dx * 0.015f);
+            stars_far[i].position.y = wrapToScreen(star_far_base[i].y - dy * 0.015f);
+        }
+        for (std::size_t i = 0; i < star_near_count; ++i) {
+            stars_near[i].position.x = wrapToScreen(star_near_base[i].x - dx * 0.032f);
+            stars_near[i].position.y = wrapToScreen(star_near_base[i].y - dy * 0.032f);
+        }
+
+        if (drawStars) {
+            window.draw(stars_far);
+            window.draw(stars_near);
         }
 
         if (drawBoxes) {
@@ -199,6 +472,11 @@ int main(int argc, char* argv[]) {
             window.draw(box_va);
         }
 
+        sf::RenderStates additive_states;
+        additive_states.blendMode = sf::BlendAdd;
+
+        if (drawGlow) window.draw(glow_va, additive_states);
+        if (drawStreaks) window.draw(streak_va, additive_states);
         window.draw(particle_va);
 
         tRenderMs = static_cast<float>(renderClock.getElapsedTime().asMicroseconds()) / 1000.0f;
@@ -265,13 +543,27 @@ int main(int argc, char* argv[]) {
                 << "render: " << tRenderMs << " ms\n"
                 << "build every N: " << engine.rebuildEvery() << "\n"
                 << "particles: " << particle_count_snapshot << "\n"
-                << "interaction radius: " << static_cast<int>(engine.interactionRadius()) << " px";
+                << "interaction radius: " << static_cast<int>(engine.interactionRadius()) << " px\n"
+                << "visual speed scale: " << speed_scale << "\n"
+                << "visual toggles g/v/n/c/b: "
+                << (drawGlow ? "1" : "0") << "/"
+                << (drawStreaks ? "1" : "0") << "/"
+                << (drawStars ? "1" : "0") << "/"
+                << palette_index << "/"
+                << (drawBoxes ? "1" : "0");
             overlay.setString(oss.str());
+            controls_legend.setString(
+                "Toggles  [G] glow " + std::string(drawGlow ? "on" : "off") +
+                "   [V] streaks " + std::string(drawStreaks ? "on" : "off") +
+                "   [N] stars " + std::string(drawStars ? "on" : "off") +
+                "   [C] palette " + std::to_string(palette_index) +
+                "   [B] boxes " + std::string(drawBoxes ? "on" : "off"));
             uiTimer.restart();
         }
 
         if (canDrawText) {
             window.draw(overlay);
+            window.draw(controls_legend);
         }
 
         window.display();
