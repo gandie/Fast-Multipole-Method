@@ -1,7 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <tuple>
 #include <vector>
+#include <omp.h>
 
 #include "barnes_hut_tree.hpp"
 #include "diagnostics.hpp"
@@ -25,6 +30,49 @@ std::vector<fmm::Source> makeGridSources(int nx, int ny, double spacing, double 
     }
 
     return sources;
+}
+
+struct ForceSnapshot {
+    double x = 0.0;
+    double y = 0.0;
+    double q = 0.0;
+    double fx = 0.0;
+    double fy = 0.0;
+};
+
+std::vector<ForceSnapshot> captureSortedForceSnapshots(
+    const std::vector<fmm::Source>& sources,
+    const std::vector<Complex>& forces) {
+
+    std::vector<ForceSnapshot> out;
+    out.reserve(sources.size());
+    for (size_t i = 0; i < sources.size(); ++i) {
+        out.push_back(ForceSnapshot{
+            sources[i].position.real(),
+            sources[i].position.imag(),
+            sources[i].q,
+            forces[i].real(),
+            forces[i].imag()});
+    }
+
+    std::sort(out.begin(), out.end(), [](const ForceSnapshot& a, const ForceSnapshot& b) {
+        return std::tie(a.x, a.y, a.q) < std::tie(b.x, b.y, b.q);
+    });
+    return out;
+}
+
+struct OmpState {
+    int max_threads = 1;
+    int dynamic_enabled = 0;
+};
+
+OmpState captureOmpState() {
+    return OmpState{omp_get_max_threads(), omp_get_dynamic()};
+}
+
+void restoreOmpState(const OmpState& state) {
+    omp_set_dynamic(state.dynamic_enabled);
+    omp_set_num_threads(state.max_threads);
 }
 
 }  // namespace
@@ -96,4 +144,78 @@ TEST_CASE("FMM overlapping particles keep finite near-field forces", "[accuracy]
         REQUIRE(std::isfinite(f.real()));
         REQUIRE(std::isfinite(f.imag()));
     }
+}
+
+TEST_CASE("FMM build is thread-policy invariant for topology and forces", "[accuracy][fmm][threading]") {
+    const OmpState initial_omp = captureOmpState();
+
+    const int runtime_threads = omp_get_max_threads();
+    if (runtime_threads < 2) {
+        SUCCEED("Runtime exposes one OpenMP thread; multi-thread invariance check skipped.");
+        return;
+    }
+
+    std::vector<fmm::Source> sources_serial = makeGridSources(29, 35, 7.0, 110.0, 140.0);
+    std::vector<fmm::Source> sources_parallel = sources_serial;
+
+    omp_set_dynamic(0);
+
+    omp_set_num_threads(1);
+    fmm::FmmTree serial_tree(sources_serial, 8, 10);
+    serial_tree.buildTree();
+
+    const int multi_threads = std::min(8, runtime_threads);
+    omp_set_num_threads(multi_threads);
+    fmm::FmmTree parallel_tree(sources_parallel, 8, 10);
+    parallel_tree.buildTree();
+
+    restoreOmpState(initial_omp);
+
+    const fmm::BuildTelemetry& serial_tm = serial_tree.lastBuildTelemetry();
+    const fmm::BuildTelemetry& parallel_tm = parallel_tree.lastBuildTelemetry();
+
+    REQUIRE(serial_tm.active_nodes == parallel_tm.active_nodes);
+    REQUIRE(serial_tm.tree_height == parallel_tm.tree_height);
+    REQUIRE(serial_tm.leaf_nodes == parallel_tm.leaf_nodes);
+    REQUIRE(serial_tm.max_leaf_sources == parallel_tm.max_leaf_sources);
+    REQUIRE(serial_tm.total_near_neighbors == parallel_tm.total_near_neighbors);
+    REQUIRE(serial_tm.total_interaction_list == parallel_tm.total_interaction_list);
+    REQUIRE(serial_tm.total_list_w == parallel_tm.total_list_w);
+    REQUIRE(serial_tm.total_list_x == parallel_tm.total_list_x);
+
+    const auto serial_snapshots = captureSortedForceSnapshots(sources_serial, serial_tree.forces);
+    const auto parallel_snapshots = captureSortedForceSnapshots(sources_parallel, parallel_tree.forces);
+
+    REQUIRE(serial_snapshots.size() == parallel_snapshots.size());
+
+    constexpr double kAbsTol = 1e-12;
+    constexpr double kRelTol = 1e-10;
+
+    for (size_t i = 0; i < serial_snapshots.size(); ++i) {
+        const auto& s = serial_snapshots[i];
+        const auto& p = parallel_snapshots[i];
+
+        REQUIRE(s.x == Approx(p.x).margin(0.0));
+        REQUIRE(s.y == Approx(p.y).margin(0.0));
+        REQUIRE(s.q == Approx(p.q).margin(0.0));
+
+        const double dx = std::abs(s.fx - p.fx);
+        const double dy = std::abs(s.fy - p.fy);
+
+        const double sx = std::max(std::abs(s.fx), std::abs(p.fx));
+        const double sy = std::max(std::abs(s.fy), std::abs(p.fy));
+
+        REQUIRE(dx <= kAbsTol + kRelTol * sx);
+        REQUIRE(dy <= kAbsTol + kRelTol * sy);
+    }
+
+    const fmm::ErrorData serial_error =
+        fmm::evaluateSimulationError(sources_serial, serial_tree.forces, sources_serial.size());
+    const fmm::ErrorData parallel_error =
+        fmm::evaluateSimulationError(sources_parallel, parallel_tree.forces, sources_parallel.size());
+
+    REQUIRE(serial_error.l2_relative_error < 0.12);
+    REQUIRE(parallel_error.l2_relative_error < 0.12);
+    REQUIRE(serial_error.mean_absolute_error < 0.01);
+    REQUIRE(parallel_error.mean_absolute_error < 0.01);
 }
