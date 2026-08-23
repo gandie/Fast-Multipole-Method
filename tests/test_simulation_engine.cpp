@@ -9,6 +9,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <omp.h>
 
 #include "simulation_engine.hpp"
 
@@ -131,6 +132,24 @@ struct BodyState {
     double vx = 0.0;
     double vy = 0.0;
 };
+
+struct OmpState {
+    int max_threads = 1;
+    int dynamic_enabled = 0;
+};
+
+struct OmpStateGuard {
+    OmpState saved;
+    explicit OmpStateGuard(OmpState state) : saved(state) {}
+    ~OmpStateGuard() {
+        omp_set_dynamic(saved.dynamic_enabled);
+        omp_set_num_threads(saved.max_threads);
+    }
+};
+
+OmpState captureOmpState() {
+    return OmpState{omp_get_max_threads(), omp_get_dynamic()};
+}
 
 double manyBodyPseudoEnergy(const std::vector<fmm::Source>& sources) {
     double kinetic = 0.0;
@@ -346,6 +365,21 @@ ScenarioRunMetrics runScenarioFixtureMetrics(const std::string& fixture_filename
     }
 
     return metrics;
+}
+
+ScenarioRunMetrics runScenarioFixtureMetricsThreaded(const std::string& fixture_filename,
+                                                     double dt,
+                                                     int steps,
+                                                     double primary_mass,
+                                                     double secondary_mass,
+                                                     int threads) {
+    omp_set_dynamic(0);
+    omp_set_num_threads(std::max(1, threads));
+    return runScenarioFixtureMetrics(fixture_filename, dt, steps, primary_mass, secondary_mass);
+}
+
+double relativeDifference(double a, double b) {
+    return std::abs(a - b) / std::max({1.0, std::abs(a), std::abs(b)});
 }
 
 double observedOrder(double coarser_error, double finer_error) {
@@ -978,4 +1012,62 @@ TEST_CASE("close-approach fixture remains finite under near-singular stress", "[
     REQUIRE(metrics.max_radius_from_initial_center < 19.0);
     REQUIRE(metrics.min_pair_distance > 2.0);
     REQUIRE(metrics.max_pair_distance < 11.5);
+}
+
+TEST_CASE("thread policies preserve long-horizon scenario envelopes", "[engine][scenario][stability][threading]") {
+    const OmpState initial_omp = captureOmpState();
+    OmpStateGuard guard(initial_omp);
+
+    const int runtime_threads = omp_get_max_threads();
+    if (runtime_threads < 2) {
+        SUCCEED("Runtime exposes one OpenMP thread; cross-policy scenario guard skipped.");
+        return;
+    }
+
+    const int multi_threads = std::min(8, runtime_threads);
+
+    const ScenarioRunMetrics high_serial = runScenarioFixtureMetricsThreaded(
+        "high_mass_ratio_binary.json", 1e-3, 12000, 80.0, 0.2, 1);
+    const ScenarioRunMetrics high_multi = runScenarioFixtureMetricsThreaded(
+        "high_mass_ratio_binary.json", 1e-3, 12000, 80.0, 0.2, multi_threads);
+
+    const ScenarioRunMetrics close_serial = runScenarioFixtureMetricsThreaded(
+        "close_approach_binary.json", 5e-4, 16000, 1.0, 1.0, 1);
+    const ScenarioRunMetrics close_multi = runScenarioFixtureMetricsThreaded(
+        "close_approach_binary.json", 5e-4, 16000, 1.0, 1.0, multi_threads);
+
+    REQUIRE(high_serial.all_finite);
+    REQUIRE(high_multi.all_finite);
+    REQUIRE(close_serial.all_finite);
+    REQUIRE(close_multi.all_finite);
+
+    REQUIRE(high_serial.max_relative_energy_drift < 0.35);
+    REQUIRE(high_multi.max_relative_energy_drift < 0.35);
+    REQUIRE(high_serial.max_radius_from_initial_center < 275.0);
+    REQUIRE(high_multi.max_radius_from_initial_center < 275.0);
+    REQUIRE(high_serial.min_pair_distance > 130.0);
+    REQUIRE(high_multi.min_pair_distance > 130.0);
+    REQUIRE(high_serial.max_pair_distance < 295.0);
+    REQUIRE(high_multi.max_pair_distance < 295.0);
+
+    REQUIRE(close_serial.max_relative_energy_drift < 0.45);
+    REQUIRE(close_multi.max_relative_energy_drift < 0.45);
+    REQUIRE(close_serial.max_radius_from_initial_center < 19.0);
+    REQUIRE(close_multi.max_radius_from_initial_center < 19.0);
+    REQUIRE(close_serial.min_pair_distance > 2.0);
+    REQUIRE(close_multi.min_pair_distance > 2.0);
+    REQUIRE(close_serial.max_pair_distance < 11.5);
+    REQUIRE(close_multi.max_pair_distance < 11.5);
+
+    REQUIRE(relativeDifference(high_serial.max_relative_energy_drift, high_multi.max_relative_energy_drift) < 1e-9);
+    REQUIRE(relativeDifference(high_serial.max_radius_from_initial_center, high_multi.max_radius_from_initial_center) < 1e-10);
+    REQUIRE(relativeDifference(high_serial.min_pair_distance, high_multi.min_pair_distance) < 1e-10);
+    REQUIRE(relativeDifference(high_serial.max_pair_distance, high_multi.max_pair_distance) < 1e-10);
+    REQUIRE(relativeDifference(high_serial.final_pair_distance, high_multi.final_pair_distance) < 1e-10);
+
+    REQUIRE(relativeDifference(close_serial.max_relative_energy_drift, close_multi.max_relative_energy_drift) < 1e-9);
+    REQUIRE(relativeDifference(close_serial.max_radius_from_initial_center, close_multi.max_radius_from_initial_center) < 1e-10);
+    REQUIRE(relativeDifference(close_serial.min_pair_distance, close_multi.min_pair_distance) < 1e-10);
+    REQUIRE(relativeDifference(close_serial.max_pair_distance, close_multi.max_pair_distance) < 1e-10);
+    REQUIRE(relativeDifference(close_serial.final_pair_distance, close_multi.final_pair_distance) < 1e-10);
 }
