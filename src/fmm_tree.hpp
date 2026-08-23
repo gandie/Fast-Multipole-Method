@@ -5,9 +5,40 @@
 #include "multipole_expansion.hpp"
 #include "local_expansion.hpp"
 #include <cassert>
+#include <chrono>
 #include <omp.h>
 
 namespace fmm {
+
+constexpr unsigned kMaxTreeDepth = 20;
+
+struct BuildTelemetry {
+    float sort_ms = 0.0f;
+    float node_lists_ms = 0.0f;
+    float upward_ms = 0.0f;
+    float downward_ms = 0.0f;
+    float forces_ms = 0.0f;
+    float total_ms = 0.0f;
+
+    std::size_t source_count = 0;
+    std::size_t active_nodes = 0;
+    std::size_t tree_height = 0;
+    std::size_t leaf_nodes = 0;
+    std::size_t max_leaf_sources = 0;
+    std::size_t total_near_neighbors = 0;
+    std::size_t total_interaction_list = 0;
+    std::size_t total_list_w = 0;
+    std::size_t total_list_x = 0;
+    std::size_t list_w_force_evals = 0;
+    std::size_t direct_pair_evals = 0;
+
+    int omp_max_threads = 0;
+    bool omp_dynamic_enabled = false;
+    int omp_threads_node_lists = 0;
+    int omp_threads_upward = 0;
+    int omp_threads_downward = 0;
+    int omp_threads_forces = 0;
+};
 
 struct DeferredUpdates {
     // target, source
@@ -47,6 +78,10 @@ public:
 
     std::vector<Complex> forces;
 
+    const BuildTelemetry& lastBuildTelemetry() const noexcept {
+        return last_build_;
+    }
+
     FmmTree(std::vector<Source> &src, size_t max_s_p_l, int p) 
         : sources(src), max_sources_per_leaf(max_s_p_l), expansion_order(p) 
     {
@@ -54,7 +89,21 @@ public:
     }
 
     void buildTree () {
+        using Clock = std::chrono::high_resolution_clock;
+
+        last_build_ = BuildTelemetry{};
+        last_build_.source_count = sources.size();
+        last_build_.omp_max_threads = omp_get_max_threads();
+        last_build_.omp_dynamic_enabled = omp_get_dynamic() != 0;
+        last_build_.omp_threads_node_lists = last_build_.omp_max_threads;
+        last_build_.omp_threads_upward = last_build_.omp_max_threads;
+        last_build_.omp_threads_downward = last_build_.omp_max_threads;
+        last_build_.omp_threads_forces = last_build_.omp_max_threads;
         if (sources.empty()) return;
+
+        const auto build_start = Clock::now();
+
+        constexpr double kMinBoxLength = 1e-3;
 
         arena.resize(sources.size() * 2);
         active_nodes = 0;
@@ -64,6 +113,7 @@ public:
         auto [l_bound, u_bound] = getDataRange(sources);
 
         double box_len = std::max(u_bound.real() - l_bound.real(), u_bound.imag() - l_bound.imag());
+        box_len = std::max(box_len, kMinBoxLength);
         Complex center((l_bound.real() + u_bound.real()) / 2.0, (l_bound.imag() + u_bound.imag()) / 2.0);
 
         bool is_leaf = (sources.size() <= max_sources_per_leaf);
@@ -78,23 +128,41 @@ public:
             this->height = 0;
             // For a single-leaf tree, near interactions are sourced from the root itself.
             arena[root_id].near_neighbors.push_back(root_id);
+
+            const auto phase_start = Clock::now();
             computeForces();
+
+            last_build_.forces_ms = static_cast<float>(
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+            finalizeBuildTelemetry(build_start);
             return;
         }
 
+        auto phase_start = Clock::now();
         sortTree(root_id); // in place sort
+        last_build_.sort_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
 
         // forces.assign(sources.size(), Complex{0.0, 0.0}); 
 
+        phase_start = Clock::now();
         for (const auto& level : level_indices) {
             int max_threads = omp_get_max_threads();
-            std::vector<DeferredUpdates> thread_notepads(max_threads);
+            if (thread_notepads_.size() != static_cast<size_t>(max_threads)) {
+                thread_notepads_.assign(static_cast<size_t>(max_threads), DeferredUpdates{});
+            }
+
+            auto& thread_notepads = thread_notepads_;
 
             size_t estimated = (level.size() / max_threads) / 5 + 10;
 
-            for (auto& notepad : thread_notepads) notepad.reserve_space(estimated);
+            for (auto& notepad : thread_notepads) {
+                notepad.deferred_near.clear();
+                notepad.deferred_W.clear();
+                notepad.reserve_space(estimated);
+            }
 
-            #pragma omp parallel for
+            #pragma omp parallel for schedule(dynamic, 64)
             for (size_t i = 0; i < level.size(); ++i) {
                 int thread_id = omp_get_thread_num();
                 computeNodeLists(level[i], thread_notepads[thread_id]);
@@ -107,10 +175,25 @@ public:
                     arena[push.first].list_W.push_back(push.second);
             }
         }
+        last_build_.node_lists_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
 
+        phase_start = Clock::now();
         upwardPass();
+        last_build_.upward_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+
+        phase_start = Clock::now();
         downwardPass();
+        last_build_.downward_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+
+        phase_start = Clock::now();
         computeForces();
+        last_build_.forces_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+
+        finalizeBuildTelemetry(build_start);
     }
 
     std::vector<std::pair<Complex, double>> getBoxGeometries() {
@@ -123,6 +206,45 @@ public:
 
 private:
     std::size_t active_nodes = 0;
+    std::vector<DeferredUpdates> thread_notepads_;
+    std::vector<uint32_t> particle_to_leaf_;
+    BuildTelemetry last_build_;
+
+    void finalizeBuildTelemetry(const std::chrono::high_resolution_clock::time_point& build_start) {
+        last_build_.total_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - build_start)
+                .count()) / 1000.0f;
+
+        last_build_.active_nodes = active_nodes;
+        last_build_.tree_height = this->height;
+
+        std::size_t leaf_nodes = 0;
+        std::size_t max_leaf_sources = 0;
+        std::size_t total_near_neighbors = 0;
+        std::size_t total_interaction_list = 0;
+        std::size_t total_list_w = 0;
+        std::size_t total_list_x = 0;
+
+        for (std::size_t id = 0; id < active_nodes; ++id) {
+            const FmmNode& node = arena[id];
+            total_near_neighbors += node.near_neighbors.size();
+            total_interaction_list += node.interaction_list.size();
+            total_list_w += node.list_W.size();
+            total_list_x += node.list_X.size();
+
+            if (node.is_leaf && node.num_sources > 0) {
+                ++leaf_nodes;
+                max_leaf_sources = std::max(max_leaf_sources, static_cast<std::size_t>(node.num_sources));
+            }
+        }
+
+        last_build_.leaf_nodes = leaf_nodes;
+        last_build_.max_leaf_sources = max_leaf_sources;
+        last_build_.total_near_neighbors = total_near_neighbors;
+        last_build_.total_interaction_list = total_interaction_list;
+        last_build_.total_list_w = total_list_w;
+        last_build_.total_list_x = total_list_x;
+    }
 
     uint32_t allocateNode (Complex center, double box_len, size_t level, uint32_t parent, bool is_leaf) {
         uint32_t id;
@@ -192,7 +314,7 @@ private:
                     uint32_t c_count = q_counts[c];
                     if (c_count > 0)  {
                         Complex child_center = arena[parent_id].center + child_directions[c] * (child_len / 2.0);
-                        bool is_leaf = (c_count <= max_sources_per_leaf) || (depth >= 20);
+                        bool is_leaf = (c_count <= max_sources_per_leaf) || (depth >= kMaxTreeDepth);
 
                         uint32_t child_id = allocateNode(child_center, child_len, depth, parent_id, is_leaf);
 
@@ -268,7 +390,7 @@ private:
         for (int depth = this->height; depth >= 0; depth--) {
             const auto &level = level_indices[depth];
 
-            #pragma omp parallel for
+            #pragma omp parallel for schedule(static)
             for (size_t i = 0; i < level.size(); i++) {
                 uint32_t node_id = level[i];
                 FmmNode &node = arena[node_id];
@@ -300,7 +422,7 @@ private:
         for (size_t depth = 2; depth <= this->height; depth++) {
             const auto &level = level_indices[depth];
 
-            #pragma omp parallel for
+            #pragma omp parallel for schedule(static)
             for (size_t i = 0; i < level.size(); i++) {
                 uint32_t node_id = level[i];
                 FmmNode &node = arena[node_id];
@@ -336,22 +458,27 @@ private:
     }
 
     void computeForces () {
+        constexpr double kMinDistanceSq = 1.0;
+
         forces.assign(sources.size(), Complex{0.0, 0.0});
 
-        std::vector<uint32_t> particle_to_leaf(sources.size(), NULL_NODE);
+        particle_to_leaf_.assign(sources.size(), NULL_NODE);
         
         for (uint32_t id = 0; id < active_nodes; id++) {
             if (arena[id].is_leaf && arena[id].num_sources > 0) {
                 for (uint32_t t_id = arena[id].start_id; t_id < arena[id].start_id + arena[id].num_sources; t_id++) {
-                    particle_to_leaf[t_id] = id;
+                    particle_to_leaf_[t_id] = id;
                 }
             }
         }
 
-        #pragma omp parallel for schedule(dynamic, 64)
+        std::size_t list_w_force_evals = 0;
+        std::size_t direct_pair_evals = 0;
+
+        #pragma omp parallel for schedule(dynamic, 64) reduction(+:list_w_force_evals,direct_pair_evals)
         for (size_t t_id = 0; t_id < sources.size(); t_id++) {
             
-            uint32_t leaf_id = particle_to_leaf[t_id];
+            uint32_t leaf_id = particle_to_leaf_[t_id];
             if (leaf_id == NULL_NODE) continue; 
 
             FmmNode &leaf = arena[leaf_id];
@@ -361,6 +488,7 @@ private:
             total_force += leaf.local_expansion.evaluateForce(target.position);
 
             for (uint32_t w_id : leaf.list_W) {
+                ++list_w_force_evals;
                 total_force += arena[w_id].multipole_expansion.evaluateForce(target.position);
             }
 
@@ -375,13 +503,18 @@ private:
                     double dy = target.position.imag() - src.position.imag();
                     
                     double r2 = dx * dx + dy * dy;
+                    if (r2 < kMinDistanceSq) r2 = kMinDistanceSq;
 
+                    ++direct_pair_evals;
                     total_force += Complex{-src.q * dx / r2, -src.q * dy / r2};
                 }
             }
             
             forces[t_id] = total_force;
         }
+
+        last_build_.list_w_force_evals = list_w_force_evals;
+        last_build_.direct_pair_evals = direct_pair_evals;
     }
 };
 

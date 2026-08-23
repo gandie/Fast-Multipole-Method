@@ -84,3 +84,16 @@ TEST_CASE("Barnes-Hut exposes box geometries after build", "[accuracy][barnes-hu
     REQUIRE_FALSE(boxes.empty());
     REQUIRE(boxes.front().second > 0.0);
 }
+
+TEST_CASE("FMM overlapping particles keep finite near-field forces", "[accuracy][fmm][stability]") {
+    std::vector<fmm::Source> sources{{200.0, 200.0, 1.0}, {200.0, 200.0, 1.2}, {240.0, 210.0, 1.0}};
+
+    fmm::FmmTree tree(sources, 10, 8);
+    tree.buildTree();
+
+    REQUIRE(tree.forces.size() == sources.size());
+    for (const Complex& f : tree.forces) {
+        REQUIRE(std::isfinite(f.real()));
+        REQUIRE(std::isfinite(f.imag()));
+    }
+}

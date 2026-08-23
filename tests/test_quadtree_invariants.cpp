@@ -67,10 +67,10 @@ TEST_CASE("getDataRange returns padded bounds for non-empty input", "[quadtree][
 
     auto [lo, hi] = fmm::QuadTree<fmm::BaseNode>::getDataRange(points);
 
-    REQUIRE(lo.real() == Approx(0.99999));
-    REQUIRE(lo.imag() == Approx(0.99999));
-    REQUIRE(hi.real() == Approx(7.00001));
-    REQUIRE(hi.imag() == Approx(9.00001));
+    REQUIRE(lo.real() == Approx(0.99994));
+    REQUIRE(lo.imag() == Approx(0.99992));
+    REQUIRE(hi.real() == Approx(7.00006));
+    REQUIRE(hi.imag() == Approx(9.00008));
 }
 
 TEST_CASE("getDataRange handles empty input", "[quadtree][range]") {

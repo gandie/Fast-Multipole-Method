@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <stdexcept>
 #include <vector>
+#include <omp.h>
 #include "sim_options.hpp"
 #include "simulation_engine.hpp"
 
@@ -45,6 +46,11 @@ int main(int argc, char* argv[]) {
             std::cerr << "Use -h or --help for usage information\n";
             return 1;
         }
+
+        omp_set_dynamic(0);
+        const int startup_omp_threads = omp_get_max_threads();
+        omp_set_num_threads(startup_omp_threads);
+        std::cout << "OMP policy: dynamic=0 threads=" << startup_omp_threads << "\n";
 
         sf::Color p_color = sf::Color::Cyan;
         const int screen_size = 1380;
@@ -100,6 +106,11 @@ int main(int argc, char* argv[]) {
         float tRenderMs = 0.f;
         float tFrameMs = 0.f;
         size_t particle_count_snapshot = particle_va.getVertexCount();
+        std::size_t telemetry_frame = 0;
+
+          std::cout << "# build_telemetry frame rebuild spike build_ms build_internal_ms sort_ms node_lists_ms upward_ms downward_ms forces_ms "
+                << "nodes height leaves max_leaf list_w_evals direct_pair_evals near_total interaction_total list_w_total list_x_total "
+                << "omp_max_threads omp_dynamic omp_threads_node_lists omp_threads_upward omp_threads_downward omp_threads_forces particles\n";
 
         while (window.isOpen()) {
         frameTimer.restart();
@@ -194,6 +205,40 @@ int main(int argc, char* argv[]) {
         tFrameMs = static_cast<float>(frameTimer.getElapsedTime().asMicroseconds()) / 1000.0f;
         const auto& stats = engine.frameStats();
 
+        if (stats.build_telemetry_updated_this_frame) {
+            const float spike_threshold = std::max(5.0f, stats.ema_build_ms * 1.8f);
+            const bool spike = stats.build_total_internal_ms > spike_threshold;
+            std::cout << "BTEL"
+                      << " frame=" << telemetry_frame
+                      << " rebuild=" << (stats.rebuilt_forces_this_frame ? 1 : 0)
+                      << " spike=" << (spike ? 1 : 0)
+                      << " build_ms=" << stats.build_ms
+                      << " build_internal_ms=" << stats.build_total_internal_ms
+                      << " sort_ms=" << stats.build_sort_ms
+                      << " node_lists_ms=" << stats.build_node_lists_ms
+                      << " upward_ms=" << stats.build_upward_ms
+                      << " downward_ms=" << stats.build_downward_ms
+                      << " forces_ms=" << stats.build_forces_ms
+                      << " nodes=" << stats.build_active_nodes
+                      << " height=" << stats.build_tree_height
+                      << " leaves=" << stats.build_leaf_nodes
+                      << " max_leaf=" << stats.build_max_leaf_sources
+                      << " list_w_evals=" << stats.build_list_w_force_evals
+                      << " direct_pair_evals=" << stats.build_direct_pair_evals
+                      << " near_total=" << stats.build_total_near_neighbors
+                      << " interaction_total=" << stats.build_total_interaction_list
+                      << " list_w_total=" << stats.build_total_list_w
+                      << " list_x_total=" << stats.build_total_list_x
+                      << " omp_max_threads=" << stats.build_omp_max_threads
+                      << " omp_dynamic=" << (stats.build_omp_dynamic_enabled ? 1 : 0)
+                      << " omp_threads_node_lists=" << stats.build_omp_threads_node_lists
+                      << " omp_threads_upward=" << stats.build_omp_threads_upward
+                      << " omp_threads_downward=" << stats.build_omp_threads_downward
+                      << " omp_threads_forces=" << stats.build_omp_threads_forces
+                      << " particles=" << particle_count_snapshot
+                      << "\n";
+        }
+
         // Update overlay at ~10 Hz
         if (canDrawText && uiTimer.getElapsedTime().asMilliseconds() >= 100) {
             std::ostringstream oss;
@@ -202,6 +247,21 @@ int main(int argc, char* argv[]) {
                 << "integrate: " << stats.integrate_ms << " ms\n"
                 << "buildTree: " << stats.build_ms << " ms"
                 << " (ema " << stats.ema_build_ms << ", max " << stats.max_build_ms << ")\n"
+                << "build phases [ms] s/l/u/d/f/t: "
+                << stats.build_sort_ms << "/"
+                << stats.build_node_lists_ms << "/"
+                << stats.build_upward_ms << "/"
+                << stats.build_downward_ms << "/"
+                << stats.build_forces_ms << "/"
+                << stats.build_total_internal_ms << "\n"
+                << "build nodes/h/leaf/maxLeaf: "
+                << stats.build_active_nodes << "/"
+                << stats.build_tree_height << "/"
+                << stats.build_leaf_nodes << "/"
+                << stats.build_max_leaf_sources << "\n"
+                << "build evals w/direct: "
+                << stats.build_list_w_force_evals << "/"
+                << stats.build_direct_pair_evals << "\n"
                 << "render: " << tRenderMs << " ms\n"
                 << "build every N: " << engine.rebuildEvery() << "\n"
                 << "particles: " << particle_count_snapshot << "\n"
@@ -215,6 +275,7 @@ int main(int argc, char* argv[]) {
         }
 
         window.display();
+        ++telemetry_frame;
         }
 
         return 0;

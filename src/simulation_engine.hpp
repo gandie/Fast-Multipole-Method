@@ -22,6 +22,33 @@ struct EngineFrameStats {
     float max_build_ms = 0.0f;
     bool rebuilt_forces_this_frame = false;
     int frames_since_force_rebuild = 0;
+
+    bool build_telemetry_updated_this_frame = false;
+    float build_sort_ms = 0.0f;
+    float build_node_lists_ms = 0.0f;
+    float build_upward_ms = 0.0f;
+    float build_downward_ms = 0.0f;
+    float build_forces_ms = 0.0f;
+    float build_total_internal_ms = 0.0f;
+
+    std::size_t build_source_count = 0;
+    std::size_t build_active_nodes = 0;
+    std::size_t build_tree_height = 0;
+    std::size_t build_leaf_nodes = 0;
+    std::size_t build_max_leaf_sources = 0;
+    std::size_t build_total_near_neighbors = 0;
+    std::size_t build_total_interaction_list = 0;
+    std::size_t build_total_list_w = 0;
+    std::size_t build_total_list_x = 0;
+    std::size_t build_list_w_force_evals = 0;
+    std::size_t build_direct_pair_evals = 0;
+
+    int build_omp_max_threads = 0;
+    bool build_omp_dynamic_enabled = false;
+    int build_omp_threads_node_lists = 0;
+    int build_omp_threads_upward = 0;
+    int build_omp_threads_downward = 0;
+    int build_omp_threads_forces = 0;
 };
 
 struct ScenarioLoadResult {

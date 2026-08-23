@@ -487,12 +487,19 @@ TEST_CASE("step updates frame stats and rebuild cadence path", "[engine][regress
     REQUIRE(first.ema_build_ms >= 0.0f);
     REQUIRE(first.rebuilt_forces_this_frame);
     REQUIRE(first.frames_since_force_rebuild == 0);
+    REQUIRE(first.build_telemetry_updated_this_frame);
+    REQUIRE(first.build_total_internal_ms >= 0.0f);
+    REQUIRE(first.build_active_nodes > 0);
+    REQUIRE(first.build_source_count == engine.particleCount());
+    REQUIRE(first.build_leaf_nodes > 0);
+    REQUIRE(first.build_max_leaf_sources > 0);
 
     engine.step(0.001);
     const sim::EngineFrameStats second = engine.frameStats();
     REQUIRE(second.max_build_ms >= first.max_build_ms);
     REQUIRE_FALSE(second.rebuilt_forces_this_frame);
     REQUIRE(second.frames_since_force_rebuild == 1);
+    REQUIRE_FALSE(second.build_telemetry_updated_this_frame);
 }
 
 TEST_CASE("rebuild cadence telemetry matches strict configured schedule", "[engine][regression][cadence]") {
@@ -509,6 +516,10 @@ TEST_CASE("rebuild cadence telemetry matches strict configured schedule", "[engi
     auto s0 = engine.frameStats();
     REQUIRE(s0.rebuilt_forces_this_frame);
     REQUIRE(s0.frames_since_force_rebuild == 0);
+    REQUIRE(s0.build_telemetry_updated_this_frame);
+    REQUIRE(s0.build_active_nodes > 0);
+    REQUIRE(s0.build_leaf_nodes > 0);
+    REQUIRE(s0.build_direct_pair_evals > 0);
 
     engine.step(0.001);
     auto s1 = engine.frameStats();

@@ -154,7 +154,7 @@ SimulationEngine::SimulationEngine(const SimulationOptions& options, int screen_
       cluster_dist_(static_cast<double>(screen_size_) / 2.0, static_cast<double>(screen_size_) / 10.0),
       uniform_dist_(100.0, static_cast<double>(screen_size_) - 100.0),
       sources_(),
-      tree_(sources_, 60, 10) {
+    tree_(sources_, 60, 10) {
     initializeSources();
 
     {
@@ -331,12 +331,40 @@ void SimulationEngine::step(double dt) {
     const bool should_rebuild_now =
         (options_.rebuild_every <= 1) || ((total_frames_ % options_.rebuild_every) == 0);
     stats_.rebuilt_forces_this_frame = should_rebuild_now;
+    stats_.build_telemetry_updated_this_frame = false;
     if (should_rebuild_now) {
         // Enforce deterministic force freshness at configured cadence.
         auto lock = lockSourcesScoped();
         std::lock_guard<std::mutex> tree_lock(tree_mutex_);
         tree_.buildTree();
         current_forces_ = tree_.forces;
+
+        const auto& build = tree_.lastBuildTelemetry();
+        stats_.build_telemetry_updated_this_frame = true;
+        stats_.build_sort_ms = build.sort_ms;
+        stats_.build_node_lists_ms = build.node_lists_ms;
+        stats_.build_upward_ms = build.upward_ms;
+        stats_.build_downward_ms = build.downward_ms;
+        stats_.build_forces_ms = build.forces_ms;
+        stats_.build_total_internal_ms = build.total_ms;
+        stats_.build_source_count = build.source_count;
+        stats_.build_active_nodes = build.active_nodes;
+        stats_.build_tree_height = build.tree_height;
+        stats_.build_leaf_nodes = build.leaf_nodes;
+        stats_.build_max_leaf_sources = build.max_leaf_sources;
+        stats_.build_total_near_neighbors = build.total_near_neighbors;
+        stats_.build_total_interaction_list = build.total_interaction_list;
+        stats_.build_total_list_w = build.total_list_w;
+        stats_.build_total_list_x = build.total_list_x;
+        stats_.build_list_w_force_evals = build.list_w_force_evals;
+        stats_.build_direct_pair_evals = build.direct_pair_evals;
+        stats_.build_omp_max_threads = build.omp_max_threads;
+        stats_.build_omp_dynamic_enabled = build.omp_dynamic_enabled;
+        stats_.build_omp_threads_node_lists = build.omp_threads_node_lists;
+        stats_.build_omp_threads_upward = build.omp_threads_upward;
+        stats_.build_omp_threads_downward = build.omp_threads_downward;
+        stats_.build_omp_threads_forces = build.omp_threads_forces;
+
         stats_.frames_since_force_rebuild = 0;
     } else {
         ++stats_.frames_since_force_rebuild;
