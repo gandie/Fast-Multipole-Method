@@ -32,6 +32,27 @@ std::vector<fmm::Source> makeGridSources(int nx, int ny, double spacing, double 
     return sources;
 }
 
+std::vector<fmm::Source> translateSources(const std::vector<fmm::Source>& sources, const Complex& shift) {
+    std::vector<fmm::Source> shifted = sources;
+    for (auto& source : shifted) {
+        source.position += shift;
+    }
+    return shifted;
+}
+
+Complex rotate90(const Complex& z) {
+    return Complex{-z.imag(), z.real()};
+}
+
+std::vector<fmm::Source> rotateSources90(const std::vector<fmm::Source>& sources) {
+    std::vector<fmm::Source> rotated = sources;
+    for (auto& source : rotated) {
+        source.position = rotate90(source.position);
+        source.velocity = rotate90(source.velocity);
+    }
+    return rotated;
+}
+
 struct ForceSnapshot {
     double x = 0.0;
     double y = 0.0;
@@ -293,5 +314,65 @@ TEST_CASE("FMM remains physically accurate under repeated shuffled source order"
             fmm::evaluateSimulationError(sources_multi, multi_tree.forces, sources_multi.size());
         REQUIRE(multi_error.l2_relative_error < 1e-12);
         REQUIRE(multi_error.mean_absolute_error < 1e-12);
+    }
+}
+
+TEST_CASE("FMM direct mode is translation invariant", "[accuracy][fmm][metamorphic][translation]") {
+    std::vector<fmm::Source> base = makeGridSources(16, 14, 13.0, 180.0, 220.0);
+    std::vector<fmm::Source> shifted = translateSources(base, Complex{137.5, -91.25});
+
+    const size_t direct_leaf_cap = base.size() + 1;
+
+    fmm::FmmTree base_tree(base, direct_leaf_cap, 10);
+    base_tree.buildTree();
+    fmm::FmmTree shifted_tree(shifted, direct_leaf_cap, 10);
+    shifted_tree.buildTree();
+
+    REQUIRE(base_tree.height == 0);
+    REQUIRE(shifted_tree.height == 0);
+    REQUIRE(base_tree.forces.size() == shifted_tree.forces.size());
+
+    constexpr double kAbsTol = 1e-12;
+    constexpr double kRelTol = 1e-10;
+    for (size_t i = 0; i < base_tree.forces.size(); ++i) {
+        const double dx = std::abs(base_tree.forces[i].real() - shifted_tree.forces[i].real());
+        const double dy = std::abs(base_tree.forces[i].imag() - shifted_tree.forces[i].imag());
+
+        const double sx = std::max(std::abs(base_tree.forces[i].real()), std::abs(shifted_tree.forces[i].real()));
+        const double sy = std::max(std::abs(base_tree.forces[i].imag()), std::abs(shifted_tree.forces[i].imag()));
+
+        REQUIRE(dx <= kAbsTol + kRelTol * sx);
+        REQUIRE(dy <= kAbsTol + kRelTol * sy);
+    }
+}
+
+TEST_CASE("FMM direct mode is 90-degree rotation equivariant", "[accuracy][fmm][metamorphic][rotation]") {
+    std::vector<fmm::Source> base = makeGridSources(16, 14, 13.0, 180.0, 220.0);
+    std::vector<fmm::Source> rotated = rotateSources90(base);
+
+    const size_t direct_leaf_cap = base.size() + 1;
+
+    fmm::FmmTree base_tree(base, direct_leaf_cap, 10);
+    base_tree.buildTree();
+    fmm::FmmTree rotated_tree(rotated, direct_leaf_cap, 10);
+    rotated_tree.buildTree();
+
+    REQUIRE(base_tree.height == 0);
+    REQUIRE(rotated_tree.height == 0);
+    REQUIRE(base_tree.forces.size() == rotated_tree.forces.size());
+
+    constexpr double kAbsTol = 1e-12;
+    constexpr double kRelTol = 1e-10;
+    for (size_t i = 0; i < base_tree.forces.size(); ++i) {
+        const Complex expected = rotate90(base_tree.forces[i]);
+
+        const double dx = std::abs(expected.real() - rotated_tree.forces[i].real());
+        const double dy = std::abs(expected.imag() - rotated_tree.forces[i].imag());
+
+        const double sx = std::max(std::abs(expected.real()), std::abs(rotated_tree.forces[i].real()));
+        const double sy = std::max(std::abs(expected.imag()), std::abs(rotated_tree.forces[i].imag()));
+
+        REQUIRE(dx <= kAbsTol + kRelTol * sx);
+        REQUIRE(dy <= kAbsTol + kRelTol * sy);
     }
 }

@@ -606,6 +606,16 @@ TEST_CASE("generated replay is deterministic for fixed seed and cadence", "[engi
     requireSameState(first, second, 1e-11);
 }
 
+TEST_CASE("scenario replay remains deterministic over extended horizon", "[engine][scenario][regression][determinism][long]") {
+    constexpr double dt = 1e-3;
+    constexpr int steps = 20000;
+
+    const auto first = runScenarioAndCaptureState("high_mass_ratio_binary.json", dt, steps);
+    const auto second = runScenarioAndCaptureState("high_mass_ratio_binary.json", dt, steps);
+
+    requireSameState(first, second, 1e-11);
+}
+
 TEST_CASE("black hole is pinned to center each step", "[engine][regression]") {
     sim::SimulationOptions options = smallOptions();
     options.black_hole_mass = 100000.0;
