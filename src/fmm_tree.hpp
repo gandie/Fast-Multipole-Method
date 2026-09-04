@@ -5,9 +5,40 @@
 #include "multipole_expansion.hpp"
 #include "local_expansion.hpp"
 #include <cassert>
+#include <chrono>
 #include <omp.h>
 
 namespace fmm {
+
+constexpr unsigned kMaxTreeDepth = 20;
+
+struct BuildTelemetry {
+    float sort_ms = 0.0f;
+    float node_lists_ms = 0.0f;
+    float upward_ms = 0.0f;
+    float downward_ms = 0.0f;
+    float forces_ms = 0.0f;
+    float total_ms = 0.0f;
+
+    std::size_t source_count = 0;
+    std::size_t active_nodes = 0;
+    std::size_t tree_height = 0;
+    std::size_t leaf_nodes = 0;
+    std::size_t max_leaf_sources = 0;
+    std::size_t total_near_neighbors = 0;
+    std::size_t total_interaction_list = 0;
+    std::size_t total_list_w = 0;
+    std::size_t total_list_x = 0;
+    std::size_t list_w_force_evals = 0;
+    std::size_t direct_pair_evals = 0;
+
+    int omp_max_threads = 0;
+    bool omp_dynamic_enabled = false;
+    int omp_threads_node_lists = 0;
+    int omp_threads_upward = 0;
+    int omp_threads_downward = 0;
+    int omp_threads_forces = 0;
+};
 
 struct DeferredUpdates {
     // target, source
@@ -47,6 +78,10 @@ public:
 
     std::vector<Complex> forces;
 
+    const BuildTelemetry& lastBuildTelemetry() const noexcept {
+        return last_build_;
+    }
+
     FmmTree(std::vector<Source> &src, size_t max_s_p_l, int p) 
         : sources(src), max_sources_per_leaf(max_s_p_l), expansion_order(p) 
     {
@@ -54,7 +89,21 @@ public:
     }
 
     void buildTree () {
+        using Clock = std::chrono::high_resolution_clock;
+
+        last_build_ = BuildTelemetry{};
+        last_build_.source_count = sources.size();
+        last_build_.omp_max_threads = omp_get_max_threads();
+        last_build_.omp_dynamic_enabled = omp_get_dynamic() != 0;
+        last_build_.omp_threads_node_lists = 1;
+        last_build_.omp_threads_upward = 1;
+        last_build_.omp_threads_downward = 1;
+        last_build_.omp_threads_forces = 1;
         if (sources.empty()) return;
+
+        const auto build_start = Clock::now();
+
+        constexpr double kMinBoxLength = 1e-3;
 
         arena.resize(sources.size() * 2);
         active_nodes = 0;
@@ -64,6 +113,7 @@ public:
         auto [l_bound, u_bound] = getDataRange(sources);
 
         double box_len = std::max(u_bound.real() - l_bound.real(), u_bound.imag() - l_bound.imag());
+        box_len = std::max(box_len, kMinBoxLength);
         Complex center((l_bound.real() + u_bound.real()) / 2.0, (l_bound.imag() + u_bound.imag()) / 2.0);
 
         bool is_leaf = (sources.size() <= max_sources_per_leaf);
@@ -76,26 +126,55 @@ public:
 
         if (is_leaf) { // root is small enough
             this->height = 0;
-            computeForces();
+            // For a single-leaf tree, near interactions are sourced from the root itself.
+            arena[root_id].near_neighbors.push_back(root_id);
+
+            const auto phase_start = Clock::now();
+            last_build_.omp_threads_forces = computeForces();
+
+            last_build_.forces_ms = static_cast<float>(
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+            finalizeBuildTelemetry(build_start);
             return;
         }
 
+        auto phase_start = Clock::now();
         sortTree(root_id); // in place sort
+        last_build_.sort_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
 
         // forces.assign(sources.size(), Complex{0.0, 0.0}); 
 
+        phase_start = Clock::now();
+        int max_node_lists_threads = 1;
         for (const auto& level : level_indices) {
-            int max_threads = omp_get_max_threads();
-            std::vector<DeferredUpdates> thread_notepads(max_threads);
+            const int phase_threads = chooseThreadCountForWork(level.size(), 64);
+            max_node_lists_threads = std::max(max_node_lists_threads, phase_threads);
 
-            size_t estimated = (level.size() / max_threads) / 5 + 10;
+            if (thread_notepads_.size() != static_cast<size_t>(phase_threads)) {
+                thread_notepads_.assign(static_cast<size_t>(phase_threads), DeferredUpdates{});
+            }
 
-            for (auto& notepad : thread_notepads) notepad.reserve_space(estimated);
+            auto& thread_notepads = thread_notepads_;
 
-            #pragma omp parallel for
-            for (size_t i = 0; i < level.size(); ++i) {
-                int thread_id = omp_get_thread_num();
-                computeNodeLists(level[i], thread_notepads[thread_id]);
+            size_t estimated = (level.size() / static_cast<size_t>(phase_threads)) / 5 + 10;
+
+            for (auto& notepad : thread_notepads) {
+                notepad.deferred_near.clear();
+                notepad.deferred_W.clear();
+                notepad.reserve_space(estimated);
+            }
+
+            if (phase_threads == 1) {
+                for (size_t i = 0; i < level.size(); ++i) {
+                    computeNodeLists(level[i], thread_notepads[0]);
+                }
+            } else {
+                #pragma omp parallel for num_threads(phase_threads) schedule(dynamic, 64)
+                for (size_t i = 0; i < level.size(); ++i) {
+                    int thread_id = omp_get_thread_num();
+                    computeNodeLists(level[i], thread_notepads[thread_id]);
+                }
             }
 
             for (const auto& notepad : thread_notepads) {
@@ -105,10 +184,26 @@ public:
                     arena[push.first].list_W.push_back(push.second);
             }
         }
+        last_build_.omp_threads_node_lists = max_node_lists_threads;
+        last_build_.node_lists_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
 
-        upwardPass();
-        downwardPass();
-        computeForces();
+        phase_start = Clock::now();
+        last_build_.omp_threads_upward = upwardPass();
+        last_build_.upward_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+
+        phase_start = Clock::now();
+        last_build_.omp_threads_downward = downwardPass();
+        last_build_.downward_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+
+        phase_start = Clock::now();
+        last_build_.omp_threads_forces = computeForces();
+        last_build_.forces_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase_start).count()) / 1000.0f;
+
+        finalizeBuildTelemetry(build_start);
     }
 
     std::vector<std::pair<Complex, double>> getBoxGeometries() {
@@ -121,6 +216,57 @@ public:
 
 private:
     std::size_t active_nodes = 0;
+    std::vector<DeferredUpdates> thread_notepads_;
+    std::vector<uint32_t> particle_to_leaf_;
+    BuildTelemetry last_build_;
+
+    int chooseThreadCountForWork(std::size_t work_items, std::size_t min_items_per_thread) const noexcept {
+        if (work_items == 0) return 1;
+
+        const int max_threads = std::max(1, last_build_.omp_max_threads);
+        if (max_threads == 1) return 1;
+        if (work_items < min_items_per_thread) return 1;
+
+        const std::size_t scaled = (work_items + min_items_per_thread - 1) / min_items_per_thread;
+        const int candidate = static_cast<int>(std::min<std::size_t>(scaled, static_cast<std::size_t>(max_threads)));
+        return std::max(1, candidate);
+    }
+
+    void finalizeBuildTelemetry(const std::chrono::high_resolution_clock::time_point& build_start) {
+        last_build_.total_ms = static_cast<float>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - build_start)
+                .count()) / 1000.0f;
+
+        last_build_.active_nodes = active_nodes;
+        last_build_.tree_height = this->height;
+
+        std::size_t leaf_nodes = 0;
+        std::size_t max_leaf_sources = 0;
+        std::size_t total_near_neighbors = 0;
+        std::size_t total_interaction_list = 0;
+        std::size_t total_list_w = 0;
+        std::size_t total_list_x = 0;
+
+        for (std::size_t id = 0; id < active_nodes; ++id) {
+            const FmmNode& node = arena[id];
+            total_near_neighbors += node.near_neighbors.size();
+            total_interaction_list += node.interaction_list.size();
+            total_list_w += node.list_W.size();
+            total_list_x += node.list_X.size();
+
+            if (node.is_leaf && node.num_sources > 0) {
+                ++leaf_nodes;
+                max_leaf_sources = std::max(max_leaf_sources, static_cast<std::size_t>(node.num_sources));
+            }
+        }
+
+        last_build_.leaf_nodes = leaf_nodes;
+        last_build_.max_leaf_sources = max_leaf_sources;
+        last_build_.total_near_neighbors = total_near_neighbors;
+        last_build_.total_interaction_list = total_interaction_list;
+        last_build_.total_list_w = total_list_w;
+        last_build_.total_list_x = total_list_x;
+    }
 
     uint32_t allocateNode (Complex center, double box_len, size_t level, uint32_t parent, bool is_leaf) {
         uint32_t id;
@@ -190,7 +336,7 @@ private:
                     uint32_t c_count = q_counts[c];
                     if (c_count > 0)  {
                         Complex child_center = arena[parent_id].center + child_directions[c] * (child_len / 2.0);
-                        bool is_leaf = (c_count <= max_sources_per_leaf) || (depth >= 20);
+                        bool is_leaf = (c_count <= max_sources_per_leaf) || (depth >= kMaxTreeDepth);
 
                         uint32_t child_id = allocateNode(child_center, child_len, depth, parent_id, is_leaf);
 
@@ -262,124 +408,243 @@ private:
         }
     }
 
-    void upwardPass () {
+    int upwardPass () {
+        int max_threads_used = 1;
         for (int depth = this->height; depth >= 0; depth--) {
             const auto &level = level_indices[depth];
+            const int phase_threads = chooseThreadCountForWork(level.size(), 128);
+            max_threads_used = std::max(max_threads_used, phase_threads);
 
-            #pragma omp parallel for
-            for (size_t i = 0; i < level.size(); i++) {
-                uint32_t node_id = level[i];
-                FmmNode &node = arena[node_id];
+            if (phase_threads == 1) {
+                for (size_t i = 0; i < level.size(); i++) {
+                    uint32_t node_id = level[i];
+                    FmmNode &node = arena[node_id];
 
-                if (node.is_leaf) {
-                    auto begin = sources.begin() + node.start_id;
-                    auto end = begin + node.num_sources;
-                    node.multipole_expansion = MultipoleExpansion(node.center, expansion_order, begin, end);
-                } else {
-                    std::array<const MultipoleExpansion*, 4> child_me;
-                    size_t child_count = 0;
+                    if (node.is_leaf) {
+                        auto begin = sources.begin() + node.start_id;
+                        auto end = begin + node.num_sources;
+                        node.multipole_expansion = MultipoleExpansion(node.center, expansion_order, begin, end);
+                    } else {
+                        std::array<const MultipoleExpansion*, 4> child_me;
+                        size_t child_count = 0;
 
-                    for (size_t c = 0; c < 4; c++) {
-                        uint32_t child_id = node.children[c];
-                        if (child_id == NULL_NODE) continue;
-                        child_me[child_count++] = &arena[child_id].multipole_expansion;
+                        for (size_t c = 0; c < 4; c++) {
+                            uint32_t child_id = node.children[c];
+                            if (child_id == NULL_NODE) continue;
+                            child_me[child_count++] = &arena[child_id].multipole_expansion;
+                        }
+
+                        node.multipole_expansion = MultipoleExpansion(
+                            node.center,
+                            std::span<const MultipoleExpansion* const>(child_me.data(), child_count)
+                        );
                     }
+                }
+            } else {
+                #pragma omp parallel for num_threads(phase_threads) schedule(static)
+                for (size_t i = 0; i < level.size(); i++) {
+                    uint32_t node_id = level[i];
+                    FmmNode &node = arena[node_id];
 
-                    node.multipole_expansion = MultipoleExpansion(
-                        node.center, 
-                        std::span<const MultipoleExpansion* const>(child_me.data(), child_count)
-                    );
+                    if (node.is_leaf) {
+                        auto begin = sources.begin() + node.start_id;
+                        auto end = begin + node.num_sources;
+                        node.multipole_expansion = MultipoleExpansion(node.center, expansion_order, begin, end);
+                    } else {
+                        std::array<const MultipoleExpansion*, 4> child_me;
+                        size_t child_count = 0;
+
+                        for (size_t c = 0; c < 4; c++) {
+                            uint32_t child_id = node.children[c];
+                            if (child_id == NULL_NODE) continue;
+                            child_me[child_count++] = &arena[child_id].multipole_expansion;
+                        }
+
+                        node.multipole_expansion = MultipoleExpansion(
+                            node.center,
+                            std::span<const MultipoleExpansion* const>(child_me.data(), child_count)
+                        );
+                    }
                 }
             }
         }
+        return max_threads_used;
     }
 
-    void downwardPass () {
+    int downwardPass () {
+        int max_threads_used = 1;
         for (size_t depth = 2; depth <= this->height; depth++) {
             const auto &level = level_indices[depth];
+            const int phase_threads = chooseThreadCountForWork(level.size(), 128);
+            max_threads_used = std::max(max_threads_used, phase_threads);
 
-            #pragma omp parallel for
-            for (size_t i = 0; i < level.size(); i++) {
-                uint32_t node_id = level[i];
-                FmmNode &node = arena[node_id];
+            if (phase_threads == 1) {
+                for (size_t i = 0; i < level.size(); i++) {
+                    uint32_t node_id = level[i];
+                    FmmNode &node = arena[node_id];
 
-                // Multipole to local, V_b bounded by 32
-                std::array<const MultipoleExpansion*, 32> incoming;
-                size_t incoming_count = 0;
-                for (uint32_t v_id : node.interaction_list) {
-                    incoming[incoming_count++] = &arena[v_id].multipole_expansion;
+                    // Multipole to local, V_b bounded by 32
+                    std::array<const MultipoleExpansion*, 32> incoming;
+                    size_t incoming_count = 0;
+                    for (uint32_t v_id : node.interaction_list) {
+                        incoming[incoming_count++] = &arena[v_id].multipole_expansion;
+                    }
+
+                    if (incoming_count > 0) {
+                        node.local_expansion += LocalExpansion(
+                            node.center,
+                            std::span<const MultipoleExpansion* const>(incoming.data(), incoming_count)
+                        );
+                    }
+
+                    // Particle to Local (X_b)
+                    for (uint32_t x_id : node.list_X) {
+                        auto begin = sources.begin() + arena[x_id].start_id;
+                        auto end = begin + arena[x_id].num_sources;
+                        node.local_expansion += LocalExpansion(node.center, expansion_order, begin, end);
+                    }
+
+                    // Local to Local (parent expansions)
+                    uint32_t parent_id = node.parent;
+                    if (parent_id != NULL_NODE) {
+                        node.local_expansion += LocalExpansion(node.center, arena[parent_id].local_expansion);
+                    }
                 }
+            } else {
+                #pragma omp parallel for num_threads(phase_threads) schedule(static)
+                for (size_t i = 0; i < level.size(); i++) {
+                    uint32_t node_id = level[i];
+                    FmmNode &node = arena[node_id];
 
-                if (incoming_count > 0) {
-                    node.local_expansion += LocalExpansion(
-                        node.center, 
-                        std::span<const MultipoleExpansion* const>(incoming.data(), incoming_count)
-                    );
-                }
-                
-                // Particle to Local (X_b)
-                for (uint32_t x_id : node.list_X) {
-                    auto begin = sources.begin() + arena[x_id].start_id;
-                    auto end = begin + arena[x_id].num_sources;
-                    node.local_expansion += LocalExpansion(node.center, expansion_order, begin, end);
-                }
+                    // Multipole to local, V_b bounded by 32
+                    std::array<const MultipoleExpansion*, 32> incoming;
+                    size_t incoming_count = 0;
+                    for (uint32_t v_id : node.interaction_list) {
+                        incoming[incoming_count++] = &arena[v_id].multipole_expansion;
+                    }
 
-                // Local to Local (parent expansions)
-                uint32_t parent_id = node.parent;
-                if (parent_id != NULL_NODE) {
-                    node.local_expansion += LocalExpansion(node.center, arena[parent_id].local_expansion);
+                    if (incoming_count > 0) {
+                        node.local_expansion += LocalExpansion(
+                            node.center,
+                            std::span<const MultipoleExpansion* const>(incoming.data(), incoming_count)
+                        );
+                    }
+
+                    // Particle to Local (X_b)
+                    for (uint32_t x_id : node.list_X) {
+                        auto begin = sources.begin() + arena[x_id].start_id;
+                        auto end = begin + arena[x_id].num_sources;
+                        node.local_expansion += LocalExpansion(node.center, expansion_order, begin, end);
+                    }
+
+                    // Local to Local (parent expansions)
+                    uint32_t parent_id = node.parent;
+                    if (parent_id != NULL_NODE) {
+                        node.local_expansion += LocalExpansion(node.center, arena[parent_id].local_expansion);
+                    }
                 }
             }
         }
+        return max_threads_used;
     }
 
-    void computeForces () {
+    int computeForces () {
+        constexpr double kMinDistanceSq = 1.0;
+
         forces.assign(sources.size(), Complex{0.0, 0.0});
 
-        std::vector<uint32_t> particle_to_leaf(sources.size(), NULL_NODE);
+        particle_to_leaf_.assign(sources.size(), NULL_NODE);
         
         for (uint32_t id = 0; id < active_nodes; id++) {
             if (arena[id].is_leaf && arena[id].num_sources > 0) {
                 for (uint32_t t_id = arena[id].start_id; t_id < arena[id].start_id + arena[id].num_sources; t_id++) {
-                    particle_to_leaf[t_id] = id;
+                    particle_to_leaf_[t_id] = id;
                 }
             }
         }
 
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (size_t t_id = 0; t_id < sources.size(); t_id++) {
-            
-            uint32_t leaf_id = particle_to_leaf[t_id];
-            if (leaf_id == NULL_NODE) continue; 
+        std::size_t list_w_force_evals = 0;
+        std::size_t direct_pair_evals = 0;
+        const int phase_threads = chooseThreadCountForWork(sources.size(), 256);
 
-            FmmNode &leaf = arena[leaf_id];
-            const Source &target = sources[t_id];
-            Complex total_force{0.0, 0.0};
+        if (phase_threads == 1) {
+            for (size_t t_id = 0; t_id < sources.size(); t_id++) {
+                uint32_t leaf_id = particle_to_leaf_[t_id];
+                if (leaf_id == NULL_NODE) continue;
 
-            total_force += leaf.local_expansion.evaluateForce(target.position);
+                FmmNode &leaf = arena[leaf_id];
+                const Source &target = sources[t_id];
+                Complex total_force{0.0, 0.0};
 
-            for (uint32_t w_id : leaf.list_W) {
-                total_force += arena[w_id].multipole_expansion.evaluateForce(target.position);
-            }
+                total_force += leaf.local_expansion.evaluateForce(target.position);
 
-            for (uint32_t u_id : leaf.near_neighbors) {
-                FmmNode &n_leaf = arena[u_id];
-
-                for (uint32_t s_id = n_leaf.start_id; s_id < n_leaf.start_id + n_leaf.num_sources; s_id++) {
-                    if (t_id == s_id) continue;
-
-                    const Source &src = sources[s_id];
-                    double dx = target.position.real() - src.position.real();
-                    double dy = target.position.imag() - src.position.imag();
-                    
-                    double r2 = dx * dx + dy * dy;
-
-                    total_force += Complex{-src.q * dx / r2, -src.q * dy / r2};
+                for (uint32_t w_id : leaf.list_W) {
+                    ++list_w_force_evals;
+                    total_force += arena[w_id].multipole_expansion.evaluateForce(target.position);
                 }
+
+                for (uint32_t u_id : leaf.near_neighbors) {
+                    FmmNode &n_leaf = arena[u_id];
+
+                    for (uint32_t s_id = n_leaf.start_id; s_id < n_leaf.start_id + n_leaf.num_sources; s_id++) {
+                        if (t_id == s_id) continue;
+
+                        const Source &src = sources[s_id];
+                        double dx = target.position.real() - src.position.real();
+                        double dy = target.position.imag() - src.position.imag();
+
+                        double r2 = dx * dx + dy * dy;
+                        if (r2 < kMinDistanceSq) r2 = kMinDistanceSq;
+
+                        ++direct_pair_evals;
+                        total_force += Complex{-src.q * dx / r2, -src.q * dy / r2};
+                    }
+                }
+
+                forces[t_id] = total_force;
             }
-            
-            forces[t_id] = total_force;
+        } else {
+            #pragma omp parallel for num_threads(phase_threads) schedule(dynamic, 64) reduction(+:list_w_force_evals,direct_pair_evals)
+            for (size_t t_id = 0; t_id < sources.size(); t_id++) {
+                uint32_t leaf_id = particle_to_leaf_[t_id];
+                if (leaf_id == NULL_NODE) continue;
+
+                FmmNode &leaf = arena[leaf_id];
+                const Source &target = sources[t_id];
+                Complex total_force{0.0, 0.0};
+
+                total_force += leaf.local_expansion.evaluateForce(target.position);
+
+                for (uint32_t w_id : leaf.list_W) {
+                    ++list_w_force_evals;
+                    total_force += arena[w_id].multipole_expansion.evaluateForce(target.position);
+                }
+
+                for (uint32_t u_id : leaf.near_neighbors) {
+                    FmmNode &n_leaf = arena[u_id];
+
+                    for (uint32_t s_id = n_leaf.start_id; s_id < n_leaf.start_id + n_leaf.num_sources; s_id++) {
+                        if (t_id == s_id) continue;
+
+                        const Source &src = sources[s_id];
+                        double dx = target.position.real() - src.position.real();
+                        double dy = target.position.imag() - src.position.imag();
+
+                        double r2 = dx * dx + dy * dy;
+                        if (r2 < kMinDistanceSq) r2 = kMinDistanceSq;
+
+                        ++direct_pair_evals;
+                        total_force += Complex{-src.q * dx / r2, -src.q * dy / r2};
+                    }
+                }
+
+                forces[t_id] = total_force;
+            }
         }
+
+        last_build_.list_w_force_evals = list_w_force_evals;
+        last_build_.direct_pair_evals = direct_pair_evals;
+        return phase_threads;
     }
 };
 

@@ -1,0 +1,22 @@
+{
+  "metadata": {
+    "name": "hierarchical-star-planet-moon"
+  },
+  "bodies": [
+    {
+      "mass": 80.0,
+      "position": [690.0, 690.0],
+      "velocity": [0.0, 0.0]
+    },
+    {
+      "mass": 1.0,
+      "position": [870.0, 690.0],
+      "velocity": [0.0, 0.6666666666666666]
+    },
+    {
+      "mass": 0.05,
+      "position": [878.0, 690.0],
+      "velocity": [0.0, 1.0202200572599405]
+    }
+  ]
+}

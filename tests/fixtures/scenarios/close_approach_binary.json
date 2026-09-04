@@ -1,0 +1,17 @@
+{
+  "metadata": {
+    "name": "close-approach-binary"
+  },
+  "bodies": [
+    {
+      "mass": 1.0,
+      "position": [687.0, 690.0],
+      "velocity": [0.0, -0.7071067811865476]
+    },
+    {
+      "mass": 1.0,
+      "position": [693.0, 690.0],
+      "velocity": [0.0, 0.7071067811865476]
+    }
+  ]
+}

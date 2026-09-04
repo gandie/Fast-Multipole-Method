@@ -1,0 +1,47 @@
+{
+  "metadata": {
+    "name": "solar-system-minimal-with-moons-stress",
+    "description": "Perturbed variant of the minimal sun-planet-moon system for chaos and stability sensitivity checks.",
+    "notes": "Small velocity and position perturbations are intentionally introduced."
+  },
+  "bodies": [
+    {
+      "mass": 100000.0,
+      "position": [690.0, 690.0],
+      "velocity": [0.0, 0.0]
+    },
+
+    {
+      "mass": 10.0,
+      "position": [910.0, 690.0],
+      "velocity": [0.0, 316.227766]
+    },
+    {
+      "mass": 0.2,
+      "position": [909.0, 716.0],
+      "velocity": [-5.062278, 316.827766]
+    },
+
+    {
+      "mass": 6.0,
+      "position": [370.0, 690.0],
+      "velocity": [0.0, -316.227766]
+    },
+    {
+      "mass": 0.12,
+      "position": [372.0, 669.0],
+      "velocity": [4.049490, -315.327766]
+    },
+
+    {
+      "mass": 30.0,
+      "position": [690.0, 230.0],
+      "velocity": [316.227766, 0.0]
+    },
+    {
+      "mass": 0.5,
+      "position": [719.0, 232.0],
+      "velocity": [315.127766, 7.777226]
+    }
+  ]
+}

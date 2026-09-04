@@ -4,6 +4,87 @@ The mathematics: [https://www.youtu.be/FhMftauQZqU](https://youtu.be/FhMftauQZqU
 
 The implementation and testing: [https://youtu.be/uOahsDhVZaE](https://youtu.be/uOahsDhVZaE)
 
+## Project Workflow (Read This First)
+
+This repository uses separate build directories for different workflows. Do not reuse one build directory for everything.
+
+- `build-release`: normal day-to-day Release builds and test runs
+- `build-coverage`: Debug + coverage instrumentation runs
+
+Using separate directories prevents CMake cache and compiler-flag confusion.
+
+### Normal Build and Test (Release)
+
+Run from repository root:
+
+```bash
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DENABLE_COVERAGE=OFF
+cmake --build build-release
+ctest --test-dir build-release --output-on-failure
+./build-release/bin/sim
+```
+
+### Scenario File Input (JSON)
+
+The simulator accepts a scenario file via `--scenario <path>`.
+
+- Scenario mode loads bodies from file and overrides generated-body flags (`-c`, `-u`, `-o`, `-b`).
+- Non-generation controls like `--rebuild-every` still apply.
+- If the file is malformed or incompatible, startup fails with an explicit error.
+
+Minimal schema:
+
+```json
+{
+   "metadata": {
+      "name": "optional",
+      "description": "optional"
+   },
+   "bodies": [
+      {
+         "mass": 10.0,
+         "position": [690.0, 690.0],
+         "velocity": [0.0, 0.0]
+      },
+      {
+         "charge": 1.0,
+         "position": [780.0, 690.0],
+         "velocity": [0.0, 180.0]
+      }
+   ]
+}
+```
+
+Notes:
+- `metadata` is optional and informational only.
+- Each body requires `position`, `velocity`, and either `mass` or `charge`.
+- If both `mass` and `charge` are present, `mass` is used.
+
+### Coverage Build and Test (Debug)
+
+Run from repository root:
+
+```bash
+cmake -S . -B build-coverage -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABLE_COVERAGE=ON
+cmake --build build-coverage
+ctest --test-dir build-coverage --output-on-failure
+gcovr --root . --filter src --exclude build --exclude build-release --exclude build-coverage --exclude venv --exclude _deps
+./build-coverage/bin/sim
+```
+
+### If Build State Gets Messy
+
+Delete only the affected build directory and reconfigure:
+
+```bash
+rm -rf build-release
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DENABLE_COVERAGE=OFF
+```
+
+### Detailed Testing Guide
+
+For test file layout, naming/tagging conventions, and adding new tests, see [tests/README.md](tests/README.md).
+
 
 # CMake SFML Project Template
 

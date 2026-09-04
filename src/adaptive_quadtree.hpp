@@ -9,6 +9,8 @@
 #include <queue>
 #include <array>
 #include <cstdint>
+#include <tuple>
+#include <functional>
 
 using Complex = std::complex<double>; 
 
@@ -110,11 +112,12 @@ constexpr uint32_t NULL_NODE = 0xFFFFFFFF;
             max_y = std::max(max_y, p.position.imag());
         }
 
-        double pad_x = std::min((max_x - min_x) * 1e-5, 1e-5);
-        double pad_y = std::min((max_y - min_y) * 1e-5, 1e-5);
+        // Keep a minimum positive pad for near-collapsed clouds to avoid zero-size root boxes.
+        double pad_x = std::max((max_x - min_x) * 1e-5, 1e-5);
+        double pad_y = std::max((max_y - min_y) * 1e-5, 1e-5);
 
         return std::make_tuple(Complex(min_x - pad_x, min_y - pad_y), 
-                            Complex(max_x + pad_x, max_y + pad_y));
+                               Complex(max_x + pad_x, max_y + pad_y));
     }
 
 }
